@@ -154,7 +154,7 @@
             <button class="btn" id="connectBtn">接続</button>
         </div>
         
-        <div id="connectionStatus" class="status-disconnected">未接続</div>
+        <div id="connectionStatus" class="status-disconnected">シグナリングサーバーに接続中...</div>
     </div>
     
     <div id="gameContainer">
@@ -181,23 +181,25 @@
     </div>
 
     <script>
+        // シグナリングサーバーのURL
+        const signalingUrl = 'wss://osizumou.onrender.com';
+        
         // P2P通信用の変数
         let isHost = false;
         let dataChannel = null;
         let peerConnection = null;
         let roomCode = null;
+        let signalingSocket = null;
+        let clientId = null;
         
         // WebRTC設定
         const rtcConfig = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' }
+                { urls: 'stun:stun1.l.google.com:19302' },
+                { urls: 'stun:stun2.l.google.com:19302' }
             ]
         };
-        
-        // 簡易シグナリングサーバー（実際にはより堅牢なものを使用）
-        const signalingUrl = 'wss://8gwifi.org/ws-echo.html';
-        let signalingSocket = null;
         
         // ゲーム設定
         const RING_RADIUS = 200;
@@ -237,7 +239,7 @@
         let mouseButtons = {};
         
         // ゲーム状態
-        let gameState = 'waiting'; // 'waiting', 'playing', 'winner'
+        let gameState = 'waiting';
         let winner = null;
         let winnerTimer = 0;
         let gameStarted = false;
@@ -252,49 +254,96 @@
         const roomCodeSection = document.getElementById('roomCodeSection');
         const joinSection = document.getElementById('joinSection');
         
-        // ランダムなルームコード生成
-        function generateRoomCode() {
-            return Math.random().toString(36).substr(2, 6).toUpperCase();
-        }
-        
         // 接続状態更新
         function updateConnectionStatus(status, className) {
             connectionStatus.textContent = status;
             connectionStatus.className = className;
         }
         
-        // ルーム作成
-        document.getElementById('createRoomBtn').addEventListener('click', () => {
-            isHost = true;
-            roomCode = generateRoomCode();
-            roomCodeDiv.textContent = roomCode;
-            roomCodeSection.style.display = 'block';
-            joinSection.style.display = 'none';
-            updateConnectionStatus('ルーム作成中...', 'status-connecting');
+        // シグナリングサーバーに接続
+        function connectToSignalingServer() {
+            updateConnectionStatus('シグナリングサーバーに接続中...', 'status-connecting');
             
-            // ホストとしてP2P接続を準備
-            createPeerConnection();
-        });
+            signalingSocket = new WebSocket(signalingUrl);
+            
+            signalingSocket.onopen = () => {
+                updateConnectionStatus('シグナリングサーバーに接続完了', 'status-connected');
+                console.log('シグナリングサーバーに接続しました');
+            };
+            
+            signalingSocket.onmessage = async (event) => {
+                const message = JSON.parse(event.data);
+                await handleSignalingMessage(message);
+            };
+            
+            signalingSocket.onclose = () => {
+                updateConnectionStatus('シグナリングサーバーから切断されました', 'status-disconnected');
+                console.log('シグナリングサーバーから切断されました');
+                // 再接続を試行
+                setTimeout(connectToSignalingServer, 3000);
+            };
+            
+            signalingSocket.onerror = (error) => {
+                updateConnectionStatus('シグナリングサーバーエラー', 'status-disconnected');
+                console.error('シグナリングサーバーエラー:', error);
+            };
+        }
         
-        // ルーム参加
-        document.getElementById('joinRoomBtn').addEventListener('click', () => {
-            isHost = false;
-            joinSection.style.display = 'block';
-            roomCodeSection.style.display = 'none';
-        });
-        
-        // 接続
-        document.getElementById('connectBtn').addEventListener('click', () => {
-            const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
-            if (code) {
-                roomCode = code;
-                updateConnectionStatus('接続中...', 'status-connecting');
-                createPeerConnection();
+        // シグナリングメッセージ処理
+        async function handleSignalingMessage(message) {
+            console.log('シグナリングメッセージ受信:', message);
+            
+            switch (message.type) {
+                case 'connected':
+                    clientId = message.clientId;
+                    console.log('クライアントID:', clientId);
+                    break;
+                    
+                case 'roomCreated':
+                    roomCode = message.roomCode;
+                    roomCodeDiv.textContent = roomCode;
+                    roomCodeSection.style.display = 'block';
+                    joinSection.style.display = 'none';
+                    updateConnectionStatus('ルーム作成完了 - 相手を待機中', 'status-connecting');
+                    break;
+                    
+                case 'roomJoined':
+                    updateConnectionStatus('ルーム参加完了 - 接続を開始', 'status-connecting');
+                    await createPeerConnection();
+                    await createOffer();
+                    break;
+                    
+                case 'guestJoined':
+                    updateConnectionStatus('相手が参加しました - 接続を開始', 'status-connecting');
+                    await createPeerConnection();
+                    break;
+                    
+                case 'offer':
+                    await handleOffer(message.offer);
+                    break;
+                    
+                case 'answer':
+                    await handleAnswer(message.answer);
+                    break;
+                    
+                case 'ice-candidate':
+                    await handleIceCandidate(message.candidate);
+                    break;
+                    
+                case 'error':
+                    updateConnectionStatus(`エラー: ${message.message}`, 'status-disconnected');
+                    break;
+                    
+                case 'hostLeft':
+                case 'guestLeft':
+                    updateConnectionStatus(message.message, 'status-disconnected');
+                    resetToInitialState();
+                    break;
             }
-        });
+        }
         
         // P2P接続作成
-        function createPeerConnection() {
+        async function createPeerConnection() {
             peerConnection = new RTCPeerConnection(rtcConfig);
             
             // データチャンネル作成（ホストの場合）
@@ -314,23 +363,83 @@
             // ICE候補の処理
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
-                    // 実際の実装では、シグナリングサーバーを通じて送信
-                    console.log('ICE candidate:', event.candidate);
+                    sendSignalingMessage({
+                        type: 'ice-candidate',
+                        candidate: event.candidate
+                    });
                 }
             };
             
-            // 接続を開始
-            if (isHost) {
-                startConnection();
-            } else {
-                joinConnection();
+            // 接続状態の監視
+            peerConnection.onconnectionstatechange = () => {
+                console.log('接続状態:', peerConnection.connectionState);
+                if (peerConnection.connectionState === 'connected') {
+                    updateConnectionStatus('P2P接続完了！', 'status-connected');
+                } else if (peerConnection.connectionState === 'disconnected' || 
+                          peerConnection.connectionState === 'failed') {
+                    updateConnectionStatus('P2P接続が切断されました', 'status-disconnected');
+                }
+            };
+        }
+        
+        // オファー作成
+        async function createOffer() {
+            try {
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                sendSignalingMessage({
+                    type: 'offer',
+                    offer: offer
+                });
+            } catch (error) {
+                console.error('オファー作成エラー:', error);
+            }
+        }
+        
+        // オファー処理
+        async function handleOffer(offer) {
+            try {
+                await peerConnection.setRemoteDescription(offer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                sendSignalingMessage({
+                    type: 'answer',
+                    answer: answer
+                });
+            } catch (error) {
+                console.error('オファー処理エラー:', error);
+            }
+        }
+        
+        // アンサー処理
+        async function handleAnswer(answer) {
+            try {
+                await peerConnection.setRemoteDescription(answer);
+            } catch (error) {
+                console.error('アンサー処理エラー:', error);
+            }
+        }
+        
+        // ICE候補処理
+        async function handleIceCandidate(candidate) {
+            try {
+                await peerConnection.addIceCandidate(candidate);
+            } catch (error) {
+                console.error('ICE候補処理エラー:', error);
+            }
+        }
+        
+        // シグナリングメッセージ送信
+        function sendSignalingMessage(message) {
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                signalingSocket.send(JSON.stringify(message));
             }
         }
         
         // データチャンネル設定
         function setupDataChannel() {
             dataChannel.onopen = () => {
-                updateConnectionStatus('接続完了！', 'status-connected');
+                console.log('データチャンネルが開かれました');
                 startGame();
             };
             
@@ -341,77 +450,75 @@
             
             dataChannel.onerror = (error) => {
                 console.error('データチャンネルエラー:', error);
-                updateConnectionStatus('接続エラー', 'status-disconnected');
+            };
+            
+            dataChannel.onclose = () => {
+                console.log('データチャンネルが閉じられました');
             };
         }
         
-        // 簡易接続（実際にはより堅牢なシグナリングが必要）
-        function startConnection() {
-            // ホストの場合の処理
-            peerConnection.createOffer().then(offer => {
-                return peerConnection.setLocalDescription(offer);
-            }).then(() => {
-                // 実際の実装では、オファーをシグナリングサーバー経由で送信
-                console.log('オファー作成完了');
-                // 簡易的な直接接続（デモ用）
-                simulateConnection();
-            });
-        }
+        // イベントリスナー
+        document.getElementById('createRoomBtn').addEventListener('click', () => {
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                isHost = true;
+                sendSignalingMessage({ type: 'createRoom' });
+            } else {
+                updateConnectionStatus('シグナリングサーバーに接続してください', 'status-disconnected');
+            }
+        });
         
-        function joinConnection() {
-            // ゲストの場合の処理
-            // 実際の実装では、シグナリングサーバーからオファーを受信
-            console.log('接続待機中...');
-            simulateConnection();
-        }
+        document.getElementById('joinRoomBtn').addEventListener('click', () => {
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                isHost = false;
+                joinSection.style.display = 'block';
+                roomCodeSection.style.display = 'none';
+            } else {
+                updateConnectionStatus('シグナリングサーバーに接続してください', 'status-disconnected');
+            }
+        });
         
-        // 簡易接続シミュレーション（実際のP2P接続のデモ）
-        function simulateConnection() {
-            // 実際の実装では、WebRTCのシグナリングプロセスを経る
-            setTimeout(() => {
-                // 接続成功をシミュレート
-                if (dataChannel) {
-                    dataChannel.readyState = 'open';
-                    setupDataChannel();
-                } else {
-                    // データチャンネルを作成（簡易版）
-                    dataChannel = {
-                        send: (data) => {
-                            // 簡易的なメッセージ送信（実際はP2P通信）
-                            setTimeout(() => {
-                                if (dataChannel.onmessage) {
-                                    dataChannel.onmessage({ data: data });
-                                }
-                            }, 50);
-                        },
-                        readyState: 'open'
-                    };
-                    setupDataChannel();
-                }
-            }, 2000);
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+            if (code && signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
+                sendSignalingMessage({
+                    type: 'joinRoom',
+                    roomCode: code
+                });
+            }
+        });
+        
+        // 初期状態にリセット
+        function resetToInitialState() {
+            connectionPanel.style.display = 'block';
+            gameContainer.style.display = 'none';
+            roomCodeSection.style.display = 'none';
+            joinSection.style.display = 'none';
+            gameStarted = false;
+            
+            if (dataChannel) {
+                dataChannel.close();
+                dataChannel = null;
+            }
+            
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
         }
         
         // リモートメッセージ処理
         function handleRemoteMessage(data) {
             switch (data.type) {
                 case 'playerMove':
-                    // 相手の移動を更新
-                    if (isHost) {
-                        player2.x = data.x;
-                        player2.y = data.y;
-                        player2.vx = data.vx;
-                        player2.vy = data.vy;
-                        player2.pushing = data.pushing;
-                    } else {
-                        player1.x = data.x;
-                        player1.y = data.y;
-                        player1.vx = data.vx;
-                        player1.vy = data.vy;
-                        player1.pushing = data.pushing;
-                    }
+                    const targetPlayer = isHost ? player2 : player1;
+                    targetPlayer.x = data.x;
+                    targetPlayer.y = data.y;
+                    targetPlayer.vx = data.vx;
+                    targetPlayer.vy = data.vy;
+                    targetPlayer.pushing = data.pushing;
                     break;
+                    
                 case 'gameState':
-                    // ゲーム状態の同期
                     if (data.winner) {
                         winner = data.winner === 'player1' ? player1 : player2;
                         gameState = 'winner';
@@ -419,6 +526,7 @@
                         updateWinnerDisplay();
                     }
                     break;
+                    
                 case 'gameReset':
                     resetGame();
                     break;
@@ -439,40 +547,14 @@
             gameStarted = true;
             gameState = 'playing';
             
-            // ホストとゲストで色を調整
             if (!isHost) {
                 player1.color = '#4444FF';
                 player2.color = '#FF4444';
-                player1.name = 'あなた';
-                player2.name = '相手';
             }
             
             resetGame();
             gameLoop();
         }
-        
-        // イベントリスナー
-        document.addEventListener('keydown', (e) => {
-            keys[e.key.toLowerCase()] = true;
-        });
-        
-        document.addEventListener('keyup', (e) => {
-            keys[e.key.toLowerCase()] = false;
-        });
-        
-        canvas.addEventListener('mousedown', (e) => {
-            mouseButtons[e.button] = true;
-            e.preventDefault();
-        });
-        
-        canvas.addEventListener('mouseup', (e) => {
-            mouseButtons[e.button] = false;
-            e.preventDefault();
-        });
-        
-        canvas.addEventListener('contextmenu', (e) => {
-            e.preventDefault();
-        });
         
         // ゲーム関数群（前回と同じ）
         function distance(a, b) {
@@ -490,7 +572,6 @@
             
             const myPlayer = isHost ? player1 : player2;
             
-            // 自分の操作のみ処理
             if (keys['w']) myPlayer.vy -= PLAYER_SPEED;
             if (keys['s']) myPlayer.vy += PLAYER_SPEED;
             if (keys['a']) myPlayer.vx -= PLAYER_SPEED;
@@ -501,7 +582,6 @@
                 myPlayer.pushCooldown = 20;
             }
             
-            // 自分の状態を相手に送信
             sendData({
                 type: 'playerMove',
                 x: myPlayer.x,
@@ -568,7 +648,6 @@
                 winnerTimer = 120;
                 updateWinnerDisplay();
                 
-                // 勝利状態を送信
                 sendData({
                     type: 'gameState',
                     winner: 'player2',
@@ -581,7 +660,6 @@
                 winnerTimer = 120;
                 updateWinnerDisplay();
                 
-                // 勝利状態を送信
                 sendData({
                     type: 'gameState',
                     winner: 'player1',
@@ -615,7 +693,6 @@
             winner = null;
             document.getElementById('winner').textContent = '';
             
-            // リセット状態を送信
             sendData({
                 type: 'gameReset'
             });
@@ -624,7 +701,6 @@
         function render() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // 土俵描画
             ctx.fillStyle = '#DEB887';
             ctx.beginPath();
             ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS, 0, Math.PI * 2);
@@ -643,7 +719,6 @@
             ctx.lineTo(RING_CENTER.x, RING_CENTER.y + RING_RADIUS - 20);
             ctx.stroke();
             
-            // プレイヤー描画
             function drawPlayer(player) {
                 ctx.fillStyle = player.color;
                 ctx.strokeStyle = player.pushing ? '#FFD700' : '#000';
@@ -668,7 +743,6 @@
             drawPlayer(player1);
             drawPlayer(player2);
             
-            // 勝利表示
             if (gameState === 'winner') {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -688,7 +762,6 @@
                 handleInput();
                 
                 if (gameState === 'playing') {
-                    // ホストのみが物理演算と勝敗判定を行う
                     if (isHost) {
                         handleCollision();
                         updatePhysics();
@@ -707,7 +780,31 @@
             requestAnimationFrame(gameLoop);
         }
         
+        // イベントリスナー
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+        
+        canvas.addEventListener('mousedown', (e) => {
+            mouseButtons[e.button] = true;
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('mouseup', (e) => {
+            mouseButtons[e.button] = false;
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+        
         // 初期化
+        connectToSignalingServer();
         gameLoop();
     </script>
 </body>
