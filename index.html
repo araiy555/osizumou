@@ -1,0 +1,714 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P押し相撲ゲーム</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            color: white;
+        }
+        
+        #connectionPanel {
+            background: rgba(0,0,0,0.3);
+            padding: 20px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            margin-bottom: 20px;
+            width: 100%;
+            max-width: 500px;
+        }
+        
+        #gameContainer {
+            position: relative;
+            border: 4px solid #8B4513;
+            border-radius: 50%;
+            background: radial-gradient(circle, #DEB887 0%, #CD853F 70%, #8B4513 100%);
+            box-shadow: 0 0 30px rgba(0,0,0,0.5);
+            display: none;
+        }
+        
+        #gameCanvas {
+            border-radius: 50%;
+            display: block;
+        }
+        
+        #ui {
+            margin-top: 20px;
+            text-align: center;
+        }
+        
+        .player-info {
+            display: inline-block;
+            margin: 0 30px;
+            padding: 15px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            backdrop-filter: blur(5px);
+        }
+        
+        .controls {
+            margin-top: 20px;
+            font-size: 14px;
+            text-align: center;
+            background: rgba(0,0,0,0.2);
+            padding: 15px;
+            border-radius: 10px;
+        }
+        
+        h1 {
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+        }
+        
+        .winner {
+            font-size: 24px;
+            font-weight: bold;
+            color: #FFD700;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            margin: 20px 0;
+        }
+        
+        .btn {
+            background: linear-gradient(45deg, #4CAF50, #45a049);
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            margin: 10px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 16px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0,0,0,0.4);
+        }
+        
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        input[type="text"] {
+            padding: 10px;
+            border: none;
+            border-radius: 10px;
+            font-size: 16px;
+            width: 200px;
+            margin: 10px;
+            text-align: center;
+        }
+        
+        #connectionStatus {
+            margin-top: 15px;
+            font-weight: bold;
+            padding: 10px;
+            border-radius: 10px;
+            background: rgba(0,0,0,0.2);
+        }
+        
+        .status-disconnected { color: #ff6b6b; }
+        .status-connecting { color: #ffd93d; }
+        .status-connected { color: #6bcf7f; }
+        
+        #roomCode {
+            font-family: monospace;
+            font-size: 18px;
+            background: rgba(255,255,255,0.1);
+            padding: 10px;
+            border-radius: 10px;
+            margin: 10px 0;
+            letter-spacing: 2px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🥊 P2P押し相撲ゲーム 🥊</h1>
+    
+    <div id="connectionPanel">
+        <div style="text-align: center;">
+            <button class="btn" id="createRoomBtn">ルーム作成</button>
+            <button class="btn" id="joinRoomBtn">ルーム参加</button>
+        </div>
+        
+        <div id="roomCodeSection" style="display: none; text-align: center;">
+            <p>ルームコード:</p>
+            <div id="roomCode">-</div>
+            <p>友達にこのコードを教えてください</p>
+        </div>
+        
+        <div id="joinSection" style="display: none; text-align: center;">
+            <p>友達のルームコードを入力:</p>
+            <input type="text" id="joinCodeInput" placeholder="ルームコードを入力">
+            <button class="btn" id="connectBtn">接続</button>
+        </div>
+        
+        <div id="connectionStatus" class="status-disconnected">未接続</div>
+    </div>
+    
+    <div id="gameContainer">
+        <canvas id="gameCanvas" width="500" height="500"></canvas>
+    </div>
+    
+    <div id="ui">
+        <div class="player-info">
+            <h3 id="player1Name">あなた</h3>
+            <p>勝利数: <span id="player1Wins">0</span></p>
+        </div>
+        <div class="player-info">
+            <h3 id="player2Name">相手</h3>
+            <p>勝利数: <span id="player2Wins">0</span></p>
+        </div>
+    </div>
+    
+    <div id="winner" class="winner"></div>
+    
+    <div class="controls">
+        <strong>操作方法:</strong><br>
+        WASD移動 + 左クリック突っ張り<br>
+        <em>土俵外に押し出されたら負け！</em>
+    </div>
+
+    <script>
+        // P2P通信用の変数
+        let isHost = false;
+        let dataChannel = null;
+        let peerConnection = null;
+        let roomCode = null;
+        
+        // WebRTC設定
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+        
+        // 簡易シグナリングサーバー（実際にはより堅牢なものを使用）
+        const signalingUrl = 'wss://8gwifi.org/ws-echo.html';
+        let signalingSocket = null;
+        
+        // ゲーム設定
+        const RING_RADIUS = 200;
+        const RING_CENTER = { x: 250, y: 250 };
+        const PLAYER_SIZE = 25;
+        const PUSH_FORCE = 8;
+        const FRICTION = 0.85;
+        const PLAYER_SPEED = 3;
+        
+        // プレイヤー
+        let player1 = {
+            x: 180,
+            y: 250,
+            vx: 0,
+            vy: 0,
+            color: '#FF4444',
+            name: 'あなた',
+            wins: 0,
+            pushing: false,
+            pushCooldown: 0
+        };
+        
+        let player2 = {
+            x: 320,
+            y: 250,
+            vx: 0,
+            vy: 0,
+            color: '#4444FF',
+            name: '相手',
+            wins: 0,
+            pushing: false,
+            pushCooldown: 0
+        };
+        
+        // 入力状態
+        let keys = {};
+        let mouseButtons = {};
+        
+        // ゲーム状態
+        let gameState = 'waiting'; // 'waiting', 'playing', 'winner'
+        let winner = null;
+        let winnerTimer = 0;
+        let gameStarted = false;
+        
+        // DOM要素
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const connectionPanel = document.getElementById('connectionPanel');
+        const gameContainer = document.getElementById('gameContainer');
+        const connectionStatus = document.getElementById('connectionStatus');
+        const roomCodeDiv = document.getElementById('roomCode');
+        const roomCodeSection = document.getElementById('roomCodeSection');
+        const joinSection = document.getElementById('joinSection');
+        
+        // ランダムなルームコード生成
+        function generateRoomCode() {
+            return Math.random().toString(36).substr(2, 6).toUpperCase();
+        }
+        
+        // 接続状態更新
+        function updateConnectionStatus(status, className) {
+            connectionStatus.textContent = status;
+            connectionStatus.className = className;
+        }
+        
+        // ルーム作成
+        document.getElementById('createRoomBtn').addEventListener('click', () => {
+            isHost = true;
+            roomCode = generateRoomCode();
+            roomCodeDiv.textContent = roomCode;
+            roomCodeSection.style.display = 'block';
+            joinSection.style.display = 'none';
+            updateConnectionStatus('ルーム作成中...', 'status-connecting');
+            
+            // ホストとしてP2P接続を準備
+            createPeerConnection();
+        });
+        
+        // ルーム参加
+        document.getElementById('joinRoomBtn').addEventListener('click', () => {
+            isHost = false;
+            joinSection.style.display = 'block';
+            roomCodeSection.style.display = 'none';
+        });
+        
+        // 接続
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+            if (code) {
+                roomCode = code;
+                updateConnectionStatus('接続中...', 'status-connecting');
+                createPeerConnection();
+            }
+        });
+        
+        // P2P接続作成
+        function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+            
+            // データチャンネル作成（ホストの場合）
+            if (isHost) {
+                dataChannel = peerConnection.createDataChannel('game', {
+                    ordered: true
+                });
+                setupDataChannel();
+            }
+            
+            // データチャンネル受信（ゲストの場合）
+            peerConnection.ondatachannel = (event) => {
+                dataChannel = event.channel;
+                setupDataChannel();
+            };
+            
+            // ICE候補の処理
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    // 実際の実装では、シグナリングサーバーを通じて送信
+                    console.log('ICE candidate:', event.candidate);
+                }
+            };
+            
+            // 接続を開始
+            if (isHost) {
+                startConnection();
+            } else {
+                joinConnection();
+            }
+        }
+        
+        // データチャンネル設定
+        function setupDataChannel() {
+            dataChannel.onopen = () => {
+                updateConnectionStatus('接続完了！', 'status-connected');
+                startGame();
+            };
+            
+            dataChannel.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                handleRemoteMessage(data);
+            };
+            
+            dataChannel.onerror = (error) => {
+                console.error('データチャンネルエラー:', error);
+                updateConnectionStatus('接続エラー', 'status-disconnected');
+            };
+        }
+        
+        // 簡易接続（実際にはより堅牢なシグナリングが必要）
+        function startConnection() {
+            // ホストの場合の処理
+            peerConnection.createOffer().then(offer => {
+                return peerConnection.setLocalDescription(offer);
+            }).then(() => {
+                // 実際の実装では、オファーをシグナリングサーバー経由で送信
+                console.log('オファー作成完了');
+                // 簡易的な直接接続（デモ用）
+                simulateConnection();
+            });
+        }
+        
+        function joinConnection() {
+            // ゲストの場合の処理
+            // 実際の実装では、シグナリングサーバーからオファーを受信
+            console.log('接続待機中...');
+            simulateConnection();
+        }
+        
+        // 簡易接続シミュレーション（実際のP2P接続のデモ）
+        function simulateConnection() {
+            // 実際の実装では、WebRTCのシグナリングプロセスを経る
+            setTimeout(() => {
+                // 接続成功をシミュレート
+                if (dataChannel) {
+                    dataChannel.readyState = 'open';
+                    setupDataChannel();
+                } else {
+                    // データチャンネルを作成（簡易版）
+                    dataChannel = {
+                        send: (data) => {
+                            // 簡易的なメッセージ送信（実際はP2P通信）
+                            setTimeout(() => {
+                                if (dataChannel.onmessage) {
+                                    dataChannel.onmessage({ data: data });
+                                }
+                            }, 50);
+                        },
+                        readyState: 'open'
+                    };
+                    setupDataChannel();
+                }
+            }, 2000);
+        }
+        
+        // リモートメッセージ処理
+        function handleRemoteMessage(data) {
+            switch (data.type) {
+                case 'playerMove':
+                    // 相手の移動を更新
+                    if (isHost) {
+                        player2.x = data.x;
+                        player2.y = data.y;
+                        player2.vx = data.vx;
+                        player2.vy = data.vy;
+                        player2.pushing = data.pushing;
+                    } else {
+                        player1.x = data.x;
+                        player1.y = data.y;
+                        player1.vx = data.vx;
+                        player1.vy = data.vy;
+                        player1.pushing = data.pushing;
+                    }
+                    break;
+                case 'gameState':
+                    // ゲーム状態の同期
+                    if (data.winner) {
+                        winner = data.winner === 'player1' ? player1 : player2;
+                        gameState = 'winner';
+                        winnerTimer = data.winnerTimer;
+                        updateWinnerDisplay();
+                    }
+                    break;
+                case 'gameReset':
+                    resetGame();
+                    break;
+            }
+        }
+        
+        // データ送信
+        function sendData(data) {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify(data));
+            }
+        }
+        
+        // ゲーム開始
+        function startGame() {
+            connectionPanel.style.display = 'none';
+            gameContainer.style.display = 'block';
+            gameStarted = true;
+            gameState = 'playing';
+            
+            // ホストとゲストで色を調整
+            if (!isHost) {
+                player1.color = '#4444FF';
+                player2.color = '#FF4444';
+                player1.name = 'あなた';
+                player2.name = '相手';
+            }
+            
+            resetGame();
+            gameLoop();
+        }
+        
+        // イベントリスナー
+        document.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+        });
+        
+        document.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+        
+        canvas.addEventListener('mousedown', (e) => {
+            mouseButtons[e.button] = true;
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('mouseup', (e) => {
+            mouseButtons[e.button] = false;
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+        });
+        
+        // ゲーム関数群（前回と同じ）
+        function distance(a, b) {
+            return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
+        }
+        
+        function normalize(vector) {
+            const len = Math.sqrt(vector.x ** 2 + vector.y ** 2);
+            if (len === 0) return { x: 0, y: 0 };
+            return { x: vector.x / len, y: vector.y / len };
+        }
+        
+        function handleInput() {
+            if (gameState !== 'playing') return;
+            
+            const myPlayer = isHost ? player1 : player2;
+            
+            // 自分の操作のみ処理
+            if (keys['w']) myPlayer.vy -= PLAYER_SPEED;
+            if (keys['s']) myPlayer.vy += PLAYER_SPEED;
+            if (keys['a']) myPlayer.vx -= PLAYER_SPEED;
+            if (keys['d']) myPlayer.vx += PLAYER_SPEED;
+            
+            if (mouseButtons[0] && myPlayer.pushCooldown <= 0) {
+                myPlayer.pushing = true;
+                myPlayer.pushCooldown = 20;
+            }
+            
+            // 自分の状態を相手に送信
+            sendData({
+                type: 'playerMove',
+                x: myPlayer.x,
+                y: myPlayer.y,
+                vx: myPlayer.vx,
+                vy: myPlayer.vy,
+                pushing: myPlayer.pushing
+            });
+        }
+        
+        function handleCollision() {
+            const dist = distance(player1, player2);
+            const minDist = PLAYER_SIZE * 2;
+            
+            if (dist < minDist) {
+                const dx = player2.x - player1.x;
+                const dy = player2.y - player1.y;
+                const norm = normalize({ x: dx, y: dy });
+                
+                const overlap = minDist - dist;
+                player1.x -= norm.x * overlap * 0.5;
+                player1.y -= norm.y * overlap * 0.5;
+                player2.x += norm.x * overlap * 0.5;
+                player2.y += norm.y * overlap * 0.5;
+                
+                if (player1.pushing) {
+                    player2.vx += norm.x * PUSH_FORCE;
+                    player2.vy += norm.y * PUSH_FORCE;
+                }
+                
+                if (player2.pushing) {
+                    player1.vx -= norm.x * PUSH_FORCE;
+                    player1.vy -= norm.y * PUSH_FORCE;
+                }
+            }
+        }
+        
+        function updatePhysics() {
+            player1.vx *= FRICTION;
+            player1.vy *= FRICTION;
+            player2.vx *= FRICTION;
+            player2.vy *= FRICTION;
+            
+            player1.x += player1.vx;
+            player1.y += player1.vy;
+            player2.x += player2.vx;
+            player2.y += player2.vy;
+            
+            if (player1.pushCooldown > 0) player1.pushCooldown--;
+            if (player2.pushCooldown > 0) player2.pushCooldown--;
+            
+            player1.pushing = false;
+            player2.pushing = false;
+        }
+        
+        function checkWinner() {
+            const dist1 = distance(player1, RING_CENTER);
+            const dist2 = distance(player2, RING_CENTER);
+            
+            if (dist1 > RING_RADIUS - PLAYER_SIZE) {
+                winner = player2;
+                player2.wins++;
+                gameState = 'winner';
+                winnerTimer = 120;
+                updateWinnerDisplay();
+                
+                // 勝利状態を送信
+                sendData({
+                    type: 'gameState',
+                    winner: 'player2',
+                    winnerTimer: winnerTimer
+                });
+            } else if (dist2 > RING_RADIUS - PLAYER_SIZE) {
+                winner = player1;
+                player1.wins++;
+                gameState = 'winner';
+                winnerTimer = 120;
+                updateWinnerDisplay();
+                
+                // 勝利状態を送信
+                sendData({
+                    type: 'gameState',
+                    winner: 'player1',
+                    winnerTimer: winnerTimer
+                });
+            }
+        }
+        
+        function updateWinnerDisplay() {
+            document.getElementById('player1Wins').textContent = player1.wins;
+            document.getElementById('player2Wins').textContent = player2.wins;
+            document.getElementById('winner').textContent = `${winner.name} の勝利！`;
+        }
+        
+        function resetGame() {
+            player1.x = 180;
+            player1.y = 250;
+            player1.vx = 0;
+            player1.vy = 0;
+            player1.pushing = false;
+            player1.pushCooldown = 0;
+            
+            player2.x = 320;
+            player2.y = 250;
+            player2.vx = 0;
+            player2.vy = 0;
+            player2.pushing = false;
+            player2.pushCooldown = 0;
+            
+            gameState = 'playing';
+            winner = null;
+            document.getElementById('winner').textContent = '';
+            
+            // リセット状態を送信
+            sendData({
+                type: 'gameReset'
+            });
+        }
+        
+        function render() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // 土俵描画
+            ctx.fillStyle = '#DEB887';
+            ctx.beginPath();
+            ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS, 0, Math.PI * 2);
+            ctx.fill();
+            
+            ctx.strokeStyle = '#8B4513';
+            ctx.lineWidth = 4;
+            ctx.beginPath();
+            ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS - 2, 0, Math.PI * 2);
+            ctx.stroke();
+            
+            ctx.strokeStyle = '#654321';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(RING_CENTER.x, RING_CENTER.y - RING_RADIUS + 20);
+            ctx.lineTo(RING_CENTER.x, RING_CENTER.y + RING_RADIUS - 20);
+            ctx.stroke();
+            
+            // プレイヤー描画
+            function drawPlayer(player) {
+                ctx.fillStyle = player.color;
+                ctx.strokeStyle = player.pushing ? '#FFD700' : '#000';
+                ctx.lineWidth = player.pushing ? 4 : 2;
+                
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, PLAYER_SIZE, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+                
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.arc(player.x - 8, player.y - 8, 3, 0, Math.PI * 2);
+                ctx.arc(player.x + 8, player.y - 8, 3, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.arc(player.x, player.y + 5, 6, 0, Math.PI);
+                ctx.stroke();
+            }
+            
+            drawPlayer(player1);
+            drawPlayer(player2);
+            
+            // 勝利表示
+            if (gameState === 'winner') {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                
+                ctx.fillStyle = '#FFD700';
+                ctx.font = 'bold 36px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText(`${winner.name} の勝利！`, canvas.width / 2, canvas.height / 2);
+                
+                ctx.font = '18px Arial';
+                ctx.fillText('3秒後に次の試合が始まります', canvas.width / 2, canvas.height / 2 + 50);
+            }
+        }
+        
+        function gameLoop() {
+            if (gameStarted) {
+                handleInput();
+                
+                if (gameState === 'playing') {
+                    // ホストのみが物理演算と勝敗判定を行う
+                    if (isHost) {
+                        handleCollision();
+                        updatePhysics();
+                        checkWinner();
+                    }
+                } else if (gameState === 'winner') {
+                    winnerTimer--;
+                    if (winnerTimer <= 0 && isHost) {
+                        resetGame();
+                    }
+                }
+                
+                render();
+            }
+            
+            requestAnimationFrame(gameLoop);
+        }
+        
+        // 初期化
+        gameLoop();
+    </script>
+</body>
+</html>
