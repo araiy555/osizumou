@@ -286,6 +286,18 @@
             font-size: 12px;
             padding: 5px 10px;
         }
+        
+        .game-status {
+            position: absolute;
+            top: 40px;
+            left: 10px;
+            background: rgba(0,0,0,0.3);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            color: white;
+            display: none;
+        }
     </style>
 </head>
 <body>
@@ -329,15 +341,16 @@
             <div id="powerBar" style="width: 0%"></div>
         </div>
         <div id="pingDisplay" class="ping-display">Ping: --ms</div>
+        <div id="gameStatus" class="game-status"></div>
     </div>
     
     <div id="ui">
         <div class="player-info">
-            <h3 id="player1Name">あなた</h3>
+            <h3 id="player1Name">プレイヤー1</h3>
             <p>勝利数: <span id="player1Wins">0</span></p>
         </div>
         <div class="player-info">
-            <h3 id="player2Name">相手</h3>
+            <h3 id="player2Name">プレイヤー2</h3>
             <p>勝利数: <span id="player2Wins">0</span></p>
         </div>
     </div>
@@ -354,7 +367,7 @@
     <script>
         // Configuration
         const SIGNALING_URL = 'wss://osizumou.onrender.com';
-        const DEBUG = true;
+        const DEBUG = false;
         
         // P2P connection variables
         let isHost = false;
@@ -392,6 +405,7 @@
         const FRICTION = 0.85;
         const PLAYER_SPEED = 3;
         const MAX_POWER = 100;
+        const SYNC_RATE = 60; // 60fps同期
         
         // Game state
         let gameState = 'waiting';
@@ -401,6 +415,7 @@
         let pushPower = 0;
         let isCharging = false;
         let lastSyncTime = 0;
+        let frameCount = 0;
         
         // Players
         let player1 = {
@@ -409,7 +424,7 @@
             vx: 0,
             vy: 0,
             color: '#FF4444',
-            name: 'あなた',
+            name: 'プレイヤー1',
             wins: 0,
             pushing: false,
             pushCooldown: 0,
@@ -422,13 +437,17 @@
             vx: 0,
             vy: 0,
             color: '#4444FF',
-            name: '相手',
+            name: 'プレイヤー2',
             wins: 0,
             pushing: false,
             pushCooldown: 0,
             isAI: false,
             aiTimer: 0
         };
+        
+        // Local player reference
+        let myPlayer = null;
+        let opponentPlayer = null;
         
         // Input state
         let keys = {};
@@ -448,6 +467,7 @@
         const pingDisplay = document.getElementById('pingDisplay');
         const debugPanel = document.getElementById('debugPanel');
         const debugLog = document.getElementById('debugLog');
+        const gameStatus = document.getElementById('gameStatus');
         
         // Debug functions
         function debugLog_func(message, data = null) {
@@ -461,6 +481,11 @@
                 logDiv.textContent = data ? `${logEntry} ${JSON.stringify(data)}` : logEntry;
                 debugLog.appendChild(logDiv);
                 debugLog.scrollTop = debugLog.scrollHeight;
+                
+                // Limit log entries
+                while (debugLog.children.length > 100) {
+                    debugLog.removeChild(debugLog.firstChild);
+                }
             }
         }
         
@@ -489,9 +514,9 @@
         function createParticle(x, y) {
             const particle = document.createElement('div');
             particle.className = 'particle';
-            particle.style.left = (x - 2) + 'px';
-            particle.style.top = (y - 2) + 'px';
-            gameContainer.appendChild(particle);
+            particle.style.left = (x - 2 + gameContainer.offsetLeft) + 'px';
+            particle.style.top = (y - 2 + gameContainer.offsetTop) + 'px';
+            document.body.appendChild(particle);
             
             setTimeout(() => {
                 if (particle.parentNode) {
@@ -636,24 +661,26 @@
             debugLog_func('P2P接続作成開始');
             peerConnection = new RTCPeerConnection(rtcConfig);
             
-            // Always create data channel first (both host and guest)
-            debugLog_func('データチャンネル作成', { role: isHost ? 'host' : 'guest' });
-            dataChannel = peerConnection.createDataChannel('game', {
-                ordered: true,
-                maxRetransmits: 3
-            });
-            setupDataChannel();
+            // Create data channel
+            if (!isHost) {
+                // Guest creates data channel when creating offer
+                debugLog_func('データチャンネル作成（ゲスト）');
+                dataChannel = peerConnection.createDataChannel('game', {
+                    ordered: true,
+                    maxRetransmits: 3
+                });
+                setupDataChannel();
+            }
             
-            // Handle incoming data channel as backup
+            // Handle incoming data channel
             peerConnection.ondatachannel = (event) => {
-                debugLog_func('追加データチャンネル受信', {
+                debugLog_func('データチャンネル受信', {
                     label: event.channel.label,
                     readyState: event.channel.readyState
                 });
                 
-                // Use incoming channel if our channel isn't working
-                if (!dataChannel || dataChannel.readyState !== 'open') {
-                    debugLog_func('受信チャンネルに切り替え');
+                if (isHost) {
+                    // Host receives data channel from guest
                     dataChannel = event.channel;
                     setupDataChannel();
                 }
@@ -672,7 +699,7 @@
                         candidate: event.candidate
                     });
                 } else {
-                    debugLog_func('ICE候補収集完了 - 最終候補');
+                    debugLog_func('ICE候補収集完了');
                 }
             };
             
@@ -692,8 +719,6 @@
                 } else if (state === 'connecting') {
                     updateConnectionStatus('P2P接続中...', 'status-connecting');
                     debugLog_func('P2P接続中...');
-                } else if (state === 'new') {
-                    debugLog_func('新しいP2P接続を作成中');
                 }
             };
             
@@ -703,58 +728,23 @@
                 debugLog_func('ICE接続状態変更', iceState);
                 
                 if (iceState === 'connected' || iceState === 'completed') {
-                    debugLog_func('ICE接続確立 - データチャンネル確認中');
+                    debugLog_func('ICE接続確立');
                     updateConnectionStatus('ICE接続確立 - データチャンネル確認中', 'status-connecting');
                     
-                    // Force check data channel after ICE success
+                    // Check data channel status
                     setTimeout(() => {
-                        if (dataChannel) {
-                            debugLog_func('データチャンネル状態確認', {
-                                readyState: dataChannel.readyState,
-                                label: dataChannel.label
-                            });
-                            
-                            if (dataChannel.readyState === 'open') {
-                                debugLog_func('データチャンネル既に開通 - ゲーム開始');
-                                startOnlineGame();
-                            } else if (dataChannel.readyState === 'connecting') {
-                                debugLog_func('データチャンネル接続中 - 手動開始オプション表示');
-                                document.getElementById('manualStart').style.display = 'block';
-                            } else {
-                                debugLog_func('データチャンネル問題あり - 手動開始オプション表示');
-                                document.getElementById('manualStart').style.display = 'block';
-                            }
+                        if (dataChannel && dataChannel.readyState === 'open') {
+                            debugLog_func('データチャンネル開通確認');
+                            startOnlineGame();
+                        } else if (peerConnection.connectionState === 'connected') {
+                            // Show manual start option if P2P is connected but data channel isn't open
+                            document.getElementById('manualStart').style.display = 'block';
                         }
                     }, 2000);
                     
                 } else if (iceState === 'failed') {
-                    debugLog_func('ICE接続失敗 - STUNサーバー問題の可能性');
+                    debugLog_func('ICE接続失敗');
                     updateConnectionStatus('ICE接続に失敗しました', 'status-disconnected');
-                    // Try to restart ICE
-                    setTimeout(() => {
-                        debugLog_func('ICE再開を試行');
-                        if (peerConnection) {
-                            peerConnection.restartIce();
-                        }
-                    }, 3000);
-                } else if (iceState === 'checking') {
-                    debugLog_func('ICE接続性確認中');
-                    updateConnectionStatus('接続性を確認中...', 'status-connecting');
-                } else if (iceState === 'disconnected') {
-                    debugLog_func('ICE接続が一時的に切断');
-                    updateConnectionStatus('接続が不安定です', 'status-connecting');
-                }
-            };
-            
-            // ICE gathering state
-            peerConnection.onicegatheringstatechange = () => {
-                const gatheringState = peerConnection.iceGatheringState;
-                debugLog_func('ICE収集状態変更', gatheringState);
-                
-                if (gatheringState === 'gathering') {
-                    updateConnectionStatus('ICE候補を収集中...', 'status-connecting');
-                } else if (gatheringState === 'complete') {
-                    debugLog_func('ICE候補収集完了');
                 }
             };
         }
@@ -762,15 +752,15 @@
         function setupDataChannel() {
             debugLog_func('データチャンネル設定開始', {
                 label: dataChannel.label,
-                readyState: dataChannel.readyState,
-                ordered: dataChannel.ordered
+                readyState: dataChannel.readyState
             });
             
             dataChannel.onopen = () => {
                 debugLog_func('データチャンネル開通 - ゲーム開始！');
                 updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
+                document.getElementById('manualStart').style.display = 'none';
                 
-                // Test data channel immediately
+                // Test data channel
                 sendData({
                     type: 'test',
                     message: 'データチャンネルテスト',
@@ -784,12 +774,6 @@
             dataChannel.onmessage = (event) => {
                 try {
                     const data = JSON.parse(event.data);
-                    
-                    if (data.type === 'test') {
-                        debugLog_func('テストメッセージ受信', data);
-                        return;
-                    }
-                    
                     handleRemoteMessage(data);
                 } catch (e) {
                     debugLog_func('データチャンネルメッセージ解析エラー', e);
@@ -808,21 +792,10 @@
             
             // If channel is already open
             if (dataChannel.readyState === 'open') {
-                debugLog_func('データチャンネルは既に開いています - ゲーム開始');
+                debugLog_func('データチャンネルは既に開いています');
                 updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
                 startOnlineGame();
             }
-            
-            // Fallback: Force start after 10 seconds if P2P seems to be working
-            setTimeout(() => {
-                if (!gameStarted && peerConnection && 
-                    (peerConnection.iceConnectionState === 'connected' || 
-                     peerConnection.iceConnectionState === 'completed')) {
-                    debugLog_func('フォールバック: P2P動作中のためゲーム強制開始');
-                    updateConnectionStatus('接続確立 - ゲーム開始', 'status-connected');
-                    startOnlineGame();
-                }
-            }, 10000);
         }
         
         async function createOffer() {
@@ -830,22 +803,13 @@
                 debugLog_func('Offer作成開始');
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
-                debugLog_func('Offer送信準備完了', { type: offer.type, sdp: offer.sdp.substring(0, 100) + '...' });
+                debugLog_func('Offer送信準備完了');
                 sendSignalingMessage({
                     type: 'offer',
                     offer: offer
                 });
                 offerSent = true;
                 debugLog_func('Offer送信完了');
-                
-                // Set timeout for answer
-                connectionTimeout = setTimeout(() => {
-                    if (!answerReceived) {
-                        debugLog_func('Answer受信タイムアウト - 接続を再試行');
-                        updateConnectionStatus('接続タイムアウト - 再試行中...', 'status-connecting');
-                        resetConnection();
-                    }
-                }, 15000); // 15秒タイムアウト
                 
             } catch (error) {
                 debugLog_func('Offer作成エラー', error);
@@ -855,12 +819,12 @@
         
         async function handleOffer(offer) {
             try {
-                debugLog_func('Offer処理開始', { type: offer.type, sdp: offer.sdp.substring(0, 100) + '...' });
+                debugLog_func('Offer処理開始');
                 await peerConnection.setRemoteDescription(offer);
                 debugLog_func('RemoteDescription設定完了');
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                debugLog_func('Answer作成完了', { type: answer.type, sdp: answer.sdp.substring(0, 100) + '...' });
+                debugLog_func('Answer作成完了');
                 sendSignalingMessage({
                     type: 'answer',
                     answer: answer
@@ -874,68 +838,27 @@
         
         async function handleAnswer(answer) {
             try {
-                debugLog_func('Answer処理開始', { type: answer.type, sdp: answer.sdp.substring(0, 100) + '...' });
+                debugLog_func('Answer処理開始');
                 await peerConnection.setRemoteDescription(answer);
                 answerReceived = true;
-                
-                if (connectionTimeout) {
-                    clearTimeout(connectionTimeout);
-                    connectionTimeout = null;
-                }
-                
-                debugLog_func('Answer処理完了 - P2P接続確立中');
+                debugLog_func('Answer処理完了');
             } catch (error) {
                 debugLog_func('Answer処理エラー', error);
                 console.error('アンサー処理エラー:', error);
             }
         }
         
-        function resetConnection() {
-            debugLog_func('接続リセット実行');
-            
-            if (connectionTimeout) {
-                clearTimeout(connectionTimeout);
-                connectionTimeout = null;
-            }
-            
-            offerSent = false;
-            answerReceived = false;
-            
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-            
-            if (dataChannel) {
-                dataChannel.close();
-                dataChannel = null;
-            }
-            
-            // Retry connection
-            setTimeout(async () => {
-                if (isHost) {
-                    debugLog_func('ホスト側接続再試行');
-                    await createPeerConnection();
-                } else {
-                    debugLog_func('ゲスト側接続再試行');
-                    await createPeerConnection();
-                    await createOffer();
-                }
-            }, 2000);
-        }
-        
         async function handleIceCandidate(candidate) {
             try {
-                debugLog_func('ICE候補追加開始', {
-                    candidate: candidate.candidate ? candidate.candidate.substring(0, 50) + '...' : 'null',
-                    sdpMid: candidate.sdpMid,
-                    sdpMLineIndex: candidate.sdpMLineIndex
-                });
-                await peerConnection.addIceCandidate(candidate);
-                debugLog_func('ICE候補追加完了');
+                if (peerConnection && peerConnection.remoteDescription) {
+                    debugLog_func('ICE候補追加開始');
+                    await peerConnection.addIceCandidate(candidate);
+                    debugLog_func('ICE候補追加完了');
+                } else {
+                    debugLog_func('ICE候補追加スキップ - RemoteDescriptionなし');
+                }
             } catch (error) {
-                // ICE候補の追加失敗は一般的なことなので、エラーとして扱わない
-                debugLog_func('ICE候補処理スキップ', { error: error.message, candidate });
+                debugLog_func('ICE候補処理エラー', { error: error.message });
             }
         }
         
@@ -947,58 +870,19 @@
                     sendData({ type: 'ping', timestamp: lastPingTime });
                 }
             }, 1000);
-            
-            // Connection stats monitoring
-            if (peerConnection) {
-                setInterval(async () => {
-                    try {
-                        const stats = await peerConnection.getStats();
-                        let candidatePairs = 0;
-                        let connectedPairs = 0;
-                        
-                        stats.forEach(report => {
-                            if (report.type === 'candidate-pair') {
-                                candidatePairs++;
-                                if (report.state === 'succeeded') {
-                                    connectedPairs++;
-                                }
-                            }
-                        });
-                        
-                        if (candidatePairs > 0) {
-                            debugLog_func('接続統計', {
-                                candidatePairs,
-                                connectedPairs,
-                                connectionState: peerConnection.connectionState,
-                                iceConnectionState: peerConnection.iceConnectionState
-                            });
-                        }
-                    } catch (e) {
-                        // Stats not available
-                    }
-                }, 5000);
-            }
         }
         
         function sendData(data) {
             if (dataChannel && dataChannel.readyState === 'open') {
                 try {
                     dataChannel.send(JSON.stringify(data));
-                    console.log('Data sent:', data.type, data.frameId || 'no-frame-id');
                 } catch (error) {
-                    console.error('Send error:', error);
+                    console.error('データ送信エラー:', error);
                 }
-            } else {
-                console.error('Cannot send data - channel not ready:', {
-                    channelExists: !!dataChannel,
-                    readyState: dataChannel?.readyState
-                });
             }
         }
         
         function handleRemoteMessage(data) {
-            console.log('=== REMOTE MESSAGE RECEIVED ===', data);
-            
             switch (data.type) {
                 case 'ping':
                     sendData({ type: 'pong', timestamp: data.timestamp });
@@ -1009,38 +893,16 @@
                     pingDisplay.textContent = `Ping: ${ping}ms`;
                     break;
                     
-                case 'player-update':
                 case 'player-state':
-                    console.log(`Updating ${data.player}:`, {
-                        from: { x: Math.round(data.player === 'player1' ? player1.x : player2.x), 
-                               y: Math.round(data.player === 'player1' ? player1.y : player2.y) },
-                        to: { x: Math.round(data.x), y: Math.round(data.y) },
-                        frameId: data.frameId
-                    });
-                    
-                    if (data.player === 'player1') {
-                        player1.x = data.x;
-                        player1.y = data.y;
-                        player1.vx = data.vx;
-                        player1.vy = data.vy;
-                        player1.pushing = data.pushing;
-                        player1.pushCooldown = data.pushCooldown;
-                        console.log('Player1 updated successfully');
-                    } else if (data.player === 'player2') {
-                        player2.x = data.x;
-                        player2.y = data.y;
-                        player2.vx = data.vx;
-                        player2.vy = data.vy;
-                        player2.pushing = data.pushing;
-                        player2.pushCooldown = data.pushCooldown;
-                        console.log('Player2 updated successfully');
-                    } else {
-                        console.error('Unknown player:', data.player);
+                    // 相手プレイヤーの状態を更新
+                    if (opponentPlayer) {
+                        opponentPlayer.x = data.x;
+                        opponentPlayer.y = data.y;
+                        opponentPlayer.vx = data.vx;
+                        opponentPlayer.vy = data.vy;
+                        opponentPlayer.pushing = data.pushing;
+                        opponentPlayer.pushCooldown = data.pushCooldown;
                     }
-                    break;
-                    
-                case 'test':
-                    console.log('Test message received:', data);
                     break;
                     
                 case 'game-state':
@@ -1048,6 +910,10 @@
                         winner = data.winner === 'player1' ? player1 : player2;
                         gameState = 'winner';
                         winnerTimer = data.winnerTimer;
+                        
+                        if (data.player1Wins !== undefined) player1.wins = data.player1Wins;
+                        if (data.player2Wins !== undefined) player2.wins = data.player2Wins;
+                        
                         updateWinnerDisplay();
                     }
                     break;
@@ -1056,15 +922,19 @@
                     resetGame();
                     break;
                     
+                case 'test':
+                    debugLog_func('テストメッセージ受信', data);
+                    break;
+                    
                 default:
-                    console.log('Unknown message type:', data.type);
+                    debugLog_func('未知のメッセージタイプ', data.type);
                     break;
             }
         }
         
         // Game functions
         function startOnlineGame() {
-            console.log('=== STARTING ONLINE GAME ===', { isHost });
+            debugLog_func('オンラインゲーム開始', { isHost });
             
             isOnline = true;
             gameStarted = true;
@@ -1074,59 +944,27 @@
             gameContainer.classList.add('ring-glow');
             powerMeter.style.display = 'block';
             pingDisplay.style.display = 'block';
+            gameStatus.style.display = 'block';
             
-            // CLEAR and SET player roles
+            // プレイヤー設定
             if (isHost) {
-                // Host controls player1 (left side, red)
-                player1.color = '#FF4444';
-                player1.name = 'あなた (ホスト)';
-                player1.x = 180;
-                player1.y = 250;
-                player1.vx = 0;
-                player1.vy = 0;
-                
-                player2.color = '#4444FF';
-                player2.name = '相手 (ゲスト)';
-                player2.x = 320;
-                player2.y = 250;
-                player2.vx = 0;
-                player2.vy = 0;
-                
-                console.log('HOST: I control player1 (red, left), remote controls player2 (blue, right)');
+                myPlayer = player1;
+                opponentPlayer = player2;
+                player1.name = 'あなた（ホスト）';
+                player2.name = '相手（ゲスト）';
             } else {
-                // Guest controls player2 (right side, blue)
-                player1.color = '#FF4444';
-                player1.name = '相手 (ホスト)';
-                player1.x = 180;
-                player1.y = 250;
-                player1.vx = 0;
-                player1.vy = 0;
-                
-                player2.color = '#4444FF';
-                player2.name = 'あなた (ゲスト)';
-                player2.x = 320;
-                player2.y = 250;
-                player2.vx = 0;
-                player2.vy = 0;
-                
-                console.log('GUEST: I control player2 (blue, right), remote controls player1 (red, left)');
+                myPlayer = player2;
+                opponentPlayer = player1;
+                player1.name = '相手（ホスト）';
+                player2.name = 'あなた（ゲスト）';
             }
             
-            // Reset everything
+            // UI更新
+            document.getElementById('player1Name').textContent = player1.name;
+            document.getElementById('player2Name').textContent = player2.name;
+            
             resetGame();
-            
-            // Send initial test data
-            setTimeout(() => {
-                const myPlayerName = isHost ? 'player1' : 'player2';
-                sendData({
-                    type: 'test',
-                    message: `Hello from ${myPlayerName}`,
-                    timestamp: Date.now()
-                });
-                console.log(`Test message sent from ${myPlayerName}`);
-            }, 1000);
-            
-            console.log('Game started successfully');
+            updateGameStatus();
         }
         
         function startDemoGame() {
@@ -1137,21 +975,32 @@
             gameContainer.style.display = 'block';
             gameContainer.classList.add('ring-glow');
             powerMeter.style.display = 'block';
-            updateConnectionStatus('デモモード - CPUと対戦中', 'status-connected');
+            gameStatus.style.display = 'block';
             
-            player2.isAI = true;
+            myPlayer = player1;
+            opponentPlayer = player2;
+            player1.name = 'あなた';
             player2.name = 'CPU';
+            player2.isAI = true;
+            
+            document.getElementById('player1Name').textContent = player1.name;
+            document.getElementById('player2Name').textContent = player2.name;
+            
             resetGame();
+            updateGameStatus();
         }
         
         function resetToInitialState() {
             isOnline = false;
             gameStarted = false;
+            gameState = 'waiting';
             connectionPanel.style.display = 'block';
             gameContainer.style.display = 'none';
             roomCodeSection.style.display = 'none';
             joinSection.style.display = 'none';
             pingDisplay.style.display = 'none';
+            gameStatus.style.display = 'none';
+            document.getElementById('manualStart').style.display = 'none';
             
             if (pingInterval) {
                 clearInterval(pingInterval);
@@ -1168,13 +1017,30 @@
                 peerConnection = null;
             }
             
-            if (signalingSocket) {
+            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
                 signalingSocket.close();
                 signalingSocket = null;
             }
             
+            myPlayer = null;
+            opponentPlayer = null;
             player2.isAI = false;
+            
+            // Reset wins
+            player1.wins = 0;
+            player2.wins = 0;
+            updateWinnerDisplay();
+            
             updateConnectionStatus('接続待機中...', 'status-disconnected');
+        }
+        
+        function updateGameStatus() {
+            if (gameStatus && gameStarted) {
+                const statusText = isOnline ? 
+                    `モード: オンライン対戦 | 役割: ${isHost ? 'ホスト' : 'ゲスト'}` :
+                    'モード: CPU対戦';
+                gameStatus.textContent = statusText;
+            }
         }
         
         function handleAI() {
@@ -1186,69 +1052,74 @@
             const dy = player1.y - player2.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
             
-            // Move towards player1
-            if (dist > PLAYER_SIZE * 2.5) {
-                player2.vx += (dx / dist) * PLAYER_SPEED * 0.5;
-                player2.vy += (dy / dist) * PLAYER_SPEED * 0.5;
+            // AIの難易度調整
+            const aggressiveness = 0.7;
+            const reactionTime = 10;
+            
+            if (player2.aiTimer % reactionTime === 0) {
+                // プレイヤーに向かって移動
+                if (dist > PLAYER_SIZE * 2.5) {
+                    player2.vx += (dx / dist) * PLAYER_SPEED * aggressiveness;
+                    player2.vy += (dy / dist) * PLAYER_SPEED * aggressiveness;
+                } else {
+                    // 近づきすぎたら回り込む
+                    player2.vx += (dy / dist) * PLAYER_SPEED * 0.5;
+                    player2.vy += (-dx / dist) * PLAYER_SPEED * 0.5;
+                }
+                
+                // 土俵端に近い場合は中央に戻る
+                const aiDistFromCenter = distance(player2, RING_CENTER);
+                if (aiDistFromCenter > RING_RADIUS * 0.7) {
+                    const toCenterX = RING_CENTER.x - player2.x;
+                    const toCenterY = RING_CENTER.y - player2.y;
+                    const toCenterDist = Math.sqrt(toCenterX * toCenterX + toCenterY * toCenterY);
+                    player2.vx += (toCenterX / toCenterDist) * PLAYER_SPEED;
+                    player2.vy += (toCenterY / toCenterDist) * PLAYER_SPEED;
+                }
             }
             
-            // Push when close
-            if (dist < PLAYER_SIZE * 3 && player2.pushCooldown <= 0 && Math.random() < 0.05) {
+            // 突っ張り判定
+            if (dist < PLAYER_SIZE * 3 && player2.pushCooldown <= 0 && Math.random() < 0.1 * aggressiveness) {
                 player2.pushing = true;
                 player2.pushCooldown = 30 + Math.random() * 20;
-            }
-            
-            // Random movement
-            if (Math.random() < 0.02) {
-                player2.vx += (Math.random() - 0.5) * PLAYER_SPEED;
-                player2.vy += (Math.random() - 0.5) * PLAYER_SPEED;
+                
+                // エフェクト
+                for (let i = 0; i < 3; i++) {
+                    createParticle(
+                        player2.x + Math.random() * 20 - 10,
+                        player2.y + Math.random() * 20 - 10
+                    );
+                }
             }
         }
         
         function handleInput() {
-            if (gameState !== 'playing') return;
-            
-            // FIXED: ホストは常にplayer1、ゲストは常にplayer2を操作
-            const myPlayer = isHost ? player1 : player2;
-            const myPlayerName = isHost ? 'player1' : 'player2';
-            
-            console.log(`[${myPlayerName}] 入力処理中`);
+            if (gameState !== 'playing' || !myPlayer) return;
             
             let moved = false;
             
-            // Movement with immediate visual feedback
-            if (keys['w']) {
+            // 移動入力
+            if (keys['w'] || keys['W']) {
                 myPlayer.vy -= PLAYER_SPEED;
                 moved = true;
-                console.log(`[${myPlayerName}] W pressed - moving up`);
             }
-            if (keys['s']) {
+            if (keys['s'] || keys['S']) {
                 myPlayer.vy += PLAYER_SPEED;
                 moved = true;
-                console.log(`[${myPlayerName}] S pressed - moving down`);
             }
-            if (keys['a']) {
+            if (keys['a'] || keys['A']) {
                 myPlayer.vx -= PLAYER_SPEED;
                 moved = true;
-                console.log(`[${myPlayerName}] A pressed - moving left`);
             }
-            if (keys['d']) {
+            if (keys['d'] || keys['D']) {
                 myPlayer.vx += PLAYER_SPEED;
                 moved = true;
-                console.log(`[${myPlayerName}] D pressed - moving right`);
             }
             
-            // Apply physics immediately for local player
-            myPlayer.vx *= FRICTION;
-            myPlayer.vy *= FRICTION;
-            myPlayer.x += myPlayer.vx;
-            myPlayer.y += myPlayer.vy;
-            
-            // Charging push
+            // 突っ張りチャージ
             if (mouseButtons[0] && !isCharging && myPlayer.pushCooldown <= 0) {
                 isCharging = true;
                 pushPower = 0;
-                console.log(`[${myPlayerName}] Push charging started`);
             }
             
             if (isCharging) {
@@ -1256,61 +1127,41 @@
                 powerBar.style.width = (pushPower / MAX_POWER * 100) + '%';
             }
             
-            // Release push
+            // 突っ張り発動
             if (!mouseButtons[0] && isCharging) {
                 isCharging = false;
                 myPlayer.pushing = true;
-                myPlayer.pushCooldown = 30 + pushPower * 0.5;
-                console.log(`[${myPlayerName}] Push executed with power: ${pushPower}`);
+                myPlayer.pushCooldown = 30 + (pushPower / MAX_POWER) * 30;
                 
-                if (pushPower > 50) {
-                    for (let i = 0; i < 5; i++) {
-                        createParticle(myPlayer.x + Math.random() * 20 - 10, myPlayer.y + Math.random() * 20 - 10);
-                    }
+                // パワーに応じたエフェクト
+                const particleCount = Math.floor(pushPower / 20) + 1;
+                for (let i = 0; i < particleCount; i++) {
+                    createParticle(
+                        myPlayer.x + Math.random() * 30 - 15,
+                        myPlayer.y + Math.random() * 30 - 15
+                    );
                 }
                 
                 pushPower = 0;
                 powerBar.style.width = '0%';
             }
             
-            // FORCE send data every frame when online
+            // オンライン時は状態を送信
             if (isOnline && dataChannel && dataChannel.readyState === 'open') {
-                const stateData = {
-                    type: 'player-update',
-                    player: myPlayerName,
-                    x: myPlayer.x,
-                    y: myPlayer.y,
-                    vx: myPlayer.vx,
-                    vy: myPlayer.vy,
-                    pushing: myPlayer.pushing,
-                    pushCooldown: myPlayer.pushCooldown,
-                    timestamp: Date.now(),
-                    frameId: Math.random().toString(36).substr(2, 5)
-                };
-                
-                console.log(`[${myPlayerName}] Sending state:`, {
-                    x: Math.round(myPlayer.x),
-                    y: Math.round(myPlayer.y),
-                    frameId: stateData.frameId
-                });
-                
-                try {
-                    dataChannel.send(JSON.stringify(stateData));
-                    console.log(`[${myPlayerName}] Data sent successfully`);
-                } catch (error) {
-                    console.error(`[${myPlayerName}] Send failed:`, error);
+                frameCount++;
+                if (frameCount % 2 === 0) { // 30fpsで送信
+                    sendData({
+                        type: 'player-state',
+                        x: myPlayer.x,
+                        y: myPlayer.y,
+                        vx: myPlayer.vx,
+                        vy: myPlayer.vy,
+                        pushing: myPlayer.pushing,
+                        pushCooldown: myPlayer.pushCooldown,
+                        timestamp: Date.now()
+                    });
                 }
-            } else {
-                console.log(`[${myPlayerName}] Cannot send - channel not ready:`, {
-                    isOnline,
-                    channelExists: !!dataChannel,
-                    readyState: dataChannel?.readyState
-                });
             }
-            
-            // Update cooldowns
-            if (myPlayer.pushCooldown > 0) myPlayer.pushCooldown--;
-            myPlayer.pushing = false;
         }
         
         function handleCollision() {
@@ -1322,45 +1173,57 @@
                 const dy = player2.y - player1.y;
                 const norm = normalize({ x: dx, y: dy });
                 
+                // オーバーラップを解消
                 const overlap = minDist - dist;
                 player1.x -= norm.x * overlap * 0.5;
                 player1.y -= norm.y * overlap * 0.5;
                 player2.x += norm.x * overlap * 0.5;
                 player2.y += norm.y * overlap * 0.5;
                 
-                // Enhanced push with power
-                if (player1.pushing) {
-                    const force = PUSH_FORCE * (1 + pushPower / MAX_POWER);
-                    player2.vx += norm.x * force;
-                    player2.vy += norm.y * force;
+                // 突っ張りの力を適用
+                if (player1.pushing && player1.pushCooldown > 25) {
+                    const pushMultiplier = 1 + (player1.pushCooldown - 25) / 25;
+                    player2.vx += norm.x * PUSH_FORCE * pushMultiplier;
+                    player2.vy += norm.y * PUSH_FORCE * pushMultiplier;
+                    player1.vx -= norm.x * PUSH_FORCE * 0.3; // 反動
+                    player1.vy -= norm.y * PUSH_FORCE * 0.3;
                 }
                 
-                if (player2.pushing) {
-                    player1.vx -= norm.x * PUSH_FORCE;
-                    player1.vy -= norm.y * PUSH_FORCE;
+                if (player2.pushing && player2.pushCooldown > 25) {
+                    const pushMultiplier = 1 + (player2.pushCooldown - 25) / 25;
+                    player1.vx -= norm.x * PUSH_FORCE * pushMultiplier;
+                    player1.vy -= norm.y * PUSH_FORCE * pushMultiplier;
+                    player2.vx += norm.x * PUSH_FORCE * 0.3; // 反動
+                    player2.vy += norm.y * PUSH_FORCE * 0.3;
                 }
             }
         }
         
         function updatePhysics() {
+            // 摩擦を適用
             player1.vx *= FRICTION;
             player1.vy *= FRICTION;
             player2.vx *= FRICTION;
             player2.vy *= FRICTION;
             
+            // 位置を更新
             player1.x += player1.vx;
             player1.y += player1.vy;
             player2.x += player2.vx;
             player2.y += player2.vy;
             
+            // クールダウンを更新
             if (player1.pushCooldown > 0) player1.pushCooldown--;
             if (player2.pushCooldown > 0) player2.pushCooldown--;
             
+            // 突っ張りフラグをリセット
             player1.pushing = false;
             player2.pushing = false;
         }
         
         function checkWinner() {
+            if (gameState !== 'playing') return;
+            
             const dist1 = distance(player1, RING_CENTER);
             const dist2 = distance(player2, RING_CENTER);
             
@@ -1375,7 +1238,9 @@
                     sendData({
                         type: 'game-state',
                         winner: 'player2',
-                        winnerTimer: winnerTimer
+                        winnerTimer: winnerTimer,
+                        player1Wins: player1.wins,
+                        player2Wins: player2.wins
                     });
                 }
             } else if (dist2 > RING_RADIUS - PLAYER_SIZE) {
@@ -1389,7 +1254,9 @@
                     sendData({
                         type: 'game-state',
                         winner: 'player1',
-                        winnerTimer: winnerTimer
+                        winnerTimer: winnerTimer,
+                        player1Wins: player1.wins,
+                        player2Wins: player2.wins
                     });
                 }
             }
@@ -1398,7 +1265,9 @@
         function updateWinnerDisplay() {
             document.getElementById('player1Wins').textContent = player1.wins;
             document.getElementById('player2Wins').textContent = player2.wins;
-            document.getElementById('winner').textContent = `${winner.name} の勝利！`;
+            if (winner) {
+                document.getElementById('winner').textContent = `${winner.name} の勝利！`;
+            }
         }
         
         function resetGame() {
@@ -1418,32 +1287,34 @@
             
             gameState = 'playing';
             winner = null;
+            winnerTimer = 0;
             pushPower = 0;
             isCharging = false;
             document.getElementById('winner').textContent = '';
             powerBar.style.width = '0%';
             
-            if (isOnline && isHost) {
-                sendData({ type: 'game-reset' });
+            if (player2.isAI) {
+                player2.aiTimer = 0;
             }
         }
         
         function render() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
-            // Draw ring
+            // 土俵を描画
             ctx.fillStyle = '#DEB887';
             ctx.beginPath();
             ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS, 0, Math.PI * 2);
             ctx.fill();
             
+            // 土俵の縁
             ctx.strokeStyle = '#8B4513';
             ctx.lineWidth = 4;
             ctx.beginPath();
             ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS - 2, 0, Math.PI * 2);
             ctx.stroke();
             
-            // Center line
+            // 中央線
             ctx.strokeStyle = '#654321';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -1451,45 +1322,67 @@
             ctx.lineTo(RING_CENTER.x, RING_CENTER.y + RING_RADIUS - 20);
             ctx.stroke();
             
-            // Draw players
+            // プレイヤーを描画
             function drawPlayer(player) {
+                ctx.save();
+                
+                // 影を描画
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+                ctx.beginPath();
+                ctx.ellipse(player.x, player.y + PLAYER_SIZE + 5, PLAYER_SIZE * 0.8, PLAYER_SIZE * 0.3, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // 本体を描画
                 ctx.fillStyle = player.color;
                 ctx.strokeStyle = player.pushing ? '#FFD700' : '#000';
                 ctx.lineWidth = player.pushing ? 4 : 2;
                 
-                // Body
                 ctx.beginPath();
                 ctx.arc(player.x, player.y, PLAYER_SIZE, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
                 
-                // Eyes
+                // 顔を描画
                 ctx.fillStyle = '#000';
+                
+                // 目
                 ctx.beginPath();
                 ctx.arc(player.x - 8, player.y - 8, 3, 0, Math.PI * 2);
                 ctx.arc(player.x + 8, player.y - 8, 3, 0, Math.PI * 2);
                 ctx.fill();
                 
-                // Mouth
+                // 口
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
                 ctx.beginPath();
-                ctx.arc(player.x, player.y + 5, 6, 0, Math.PI);
+                if (player.pushing) {
+                    // 力んでいる顔
+                    ctx.moveTo(player.x - 8, player.y + 8);
+                    ctx.lineTo(player.x + 8, player.y + 8);
+                } else {
+                    // 通常の顔
+                    ctx.arc(player.x, player.y + 5, 6, 0, Math.PI);
+                }
                 ctx.stroke();
                 
-                // Cooldown indicator
+                // クールダウンインジケーター
                 if (player.pushCooldown > 0) {
-                    ctx.strokeStyle = '#FF0000';
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.6)';
                     ctx.lineWidth = 3;
                     ctx.beginPath();
-                    ctx.arc(player.x, player.y, PLAYER_SIZE + 5, 0, (player.pushCooldown / 50) * Math.PI * 2);
+                    const angle = (player.pushCooldown / 60) * Math.PI * 2;
+                    ctx.arc(player.x, player.y, PLAYER_SIZE + 5, -Math.PI / 2, -Math.PI / 2 + angle);
                     ctx.stroke();
                 }
+                
+                ctx.restore();
             }
             
             drawPlayer(player1);
             drawPlayer(player2);
             
-            // Winner overlay
-            if (gameState === 'winner') {
+            // 勝者表示
+            if (gameState === 'winner' && winner) {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
                 
@@ -1499,7 +1392,9 @@
                 ctx.fillText(`${winner.name} の勝利！`, canvas.width / 2, canvas.height / 2);
                 
                 ctx.font = '18px Arial';
-                ctx.fillText(`${Math.ceil(winnerTimer / 60)}秒後に次の試合が始まります`, canvas.width / 2, canvas.height / 2 + 50);
+                ctx.fillStyle = '#FFF';
+                const remainingTime = Math.ceil(winnerTimer / 60);
+                ctx.fillText(`${remainingTime}秒後に次の試合が始まります`, canvas.width / 2, canvas.height / 2 + 50);
             }
         }
         
@@ -1508,24 +1403,39 @@
                 handleInput();
                 
                 if (!isOnline) {
+                    // オフラインモード
                     handleAI();
-                    // Single player physics
                     handleCollision();
                     updatePhysics();
                     checkWinner();
                 } else {
-                    // Online mode: don't run physics here, only in handleInput
-                    // Host still handles collision detection for consistency
+                    // オンラインモード
                     if (isHost) {
+                        // ホストが物理演算と勝敗判定を行う
                         handleCollision();
+                        updatePhysics();
                         checkWinner();
+                    } else {
+                        // ゲストは自分のプレイヤーのみ物理演算
+                        myPlayer.vx *= FRICTION;
+                        myPlayer.vy *= FRICTION;
+                        myPlayer.x += myPlayer.vx;
+                        myPlayer.y += myPlayer.vy;
+                        if (myPlayer.pushCooldown > 0) myPlayer.pushCooldown--;
+                        myPlayer.pushing = false;
                     }
                 }
                 
+                // 勝者カウントダウン処理
                 if (gameState === 'winner') {
                     winnerTimer--;
-                    if (winnerTimer <= 0 && (!isOnline || isHost)) {
-                        resetGame();
+                    if (winnerTimer <= 0) {
+                        if (!isOnline || isHost) {
+                            resetGame();
+                            if (isOnline) {
+                                sendData({ type: 'game-reset' });
+                            }
+                        }
                     }
                 }
                 
@@ -1545,67 +1455,85 @@
         });
         
         canvas.addEventListener('mousedown', (e) => {
-            mouseButtons[e.button] = true;
-            e.preventDefault();
+            if (e.button === 0) {
+                mouseButtons[0] = true;
+                e.preventDefault();
+            }
         });
         
         canvas.addEventListener('mouseup', (e) => {
-            mouseButtons[e.button] = false;
-            e.preventDefault();
+            if (e.button === 0) {
+                mouseButtons[0] = false;
+                e.preventDefault();
+            }
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            mouseButtons[0] = false;
         });
         
         canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
         });
         
+        // Touch events for mobile
+        canvas.addEventListener('touchstart', (e) => {
+            mouseButtons[0] = true;
+            e.preventDefault();
+        });
+        
+        canvas.addEventListener('touchend', (e) => {
+            mouseButtons[0] = false;
+            e.preventDefault();
+        });
+        
         // Connection button handlers
         document.getElementById('createRoomBtn').addEventListener('click', async () => {
             try {
-                debugLog_func('ルーム作成ボタンクリック');
                 isHost = true;
                 await connectToSignalingServer();
-                debugLog_func('シグナリングサーバー接続完了 - ルーム作成要求送信');
                 sendSignalingMessage({ type: 'createRoom' });
             } catch (error) {
                 updateConnectionStatus('ルーム作成に失敗しました', 'status-disconnected');
-                debugLog_func('ルーム作成エラー', error);
                 console.error('ルーム作成エラー:', error);
             }
         });
         
         document.getElementById('joinRoomBtn').addEventListener('click', () => {
-            debugLog_func('ルーム参加ボタンクリック');
             isHost = false;
             joinSection.style.display = 'block';
             roomCodeSection.style.display = 'none';
+            document.getElementById('joinCodeInput').focus();
         });
         
         document.getElementById('connectBtn').addEventListener('click', async () => {
             const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
-            debugLog_func('接続ボタンクリック', { roomCode: code });
             
             if (code.length === 6) {
                 try {
                     roomCode = code;
                     await connectToSignalingServer();
-                    debugLog_func('シグナリングサーバー接続完了 - ルーム参加要求送信');
                     sendSignalingMessage({
                         type: 'joinRoom',
                         roomCode: code
                     });
                 } catch (error) {
                     updateConnectionStatus('ルーム参加に失敗しました', 'status-disconnected');
-                    debugLog_func('ルーム参加エラー', error);
                     console.error('ルーム参加エラー:', error);
                 }
             } else {
-                updateConnectionStatus('正しいルームコードを入力してください', 'status-disconnected');
-                debugLog_func('無効なルームコード', code);
+                updateConnectionStatus('6文字のルームコードを入力してください', 'status-disconnected');
+            }
+        });
+        
+        // Enter key support for join code input
+        document.getElementById('joinCodeInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') {
+                document.getElementById('connectBtn').click();
             }
         });
         
         document.getElementById('demoBtn').addEventListener('click', () => {
-            debugLog_func('デモモードボタンクリック');
             startDemoGame();
         });
         
@@ -1616,13 +1544,13 @@
         });
         
         document.getElementById('forceStartBtn').addEventListener('click', () => {
-            debugLog_func('手動ゲーム開始ボタンクリック');
             document.getElementById('manualStart').style.display = 'none';
             startOnlineGame();
         });
         
         // Initialize
         gameLoop();
+        console.log('P2P押し相撲ゲーム v1.0 - 初期化完了');
     </script>
 </body>
 </html>
