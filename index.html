@@ -313,6 +313,11 @@
         
         <div id="connectionStatus" class="status-disconnected">接続待機中...</div>
         
+        <div id="manualStart" style="display: none; text-align: center; margin-top: 15px;">
+            <button class="btn" id="forceStartBtn">手動でゲーム開始</button>
+            <p><small>P2P接続は確立されていますが、データチャンネルの開通を待機中です</small></p>
+        </div>
+        
         <div id="debugPanel" class="debug-panel">
             <div id="debugLog"></div>
         </div>
@@ -365,15 +370,18 @@
         let offerSent = false;
         let answerReceived = false;
         
-        // WebRTC configuration
+        // WebRTC configuration with more STUN servers
         const rtcConfig = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
                 { urls: 'stun:stun1.l.google.com:19302' },
                 { urls: 'stun:stun2.l.google.com:19302' },
                 { urls: 'stun:stun3.l.google.com:19302' },
-                { urls: 'stun:stun4.l.google.com:19302' }
-            ]
+                { urls: 'stun:stun4.l.google.com:19302' },
+                { urls: 'stun:stun.cloudflare.com:3478' },
+                { urls: 'stun:global.stun.twilio.com:3478' }
+            ],
+            iceCandidatePoolSize: 10
         };
         
         // Game configuration
@@ -628,32 +636,43 @@
             debugLog_func('P2P接続作成開始');
             peerConnection = new RTCPeerConnection(rtcConfig);
             
-            // Create data channel (host only)
-            if (isHost) {
-                debugLog_func('データチャンネル作成（ホスト）');
-                dataChannel = peerConnection.createDataChannel('game', {
-                    ordered: true
-                });
-                setupDataChannel();
-            }
+            // Always create data channel first (both host and guest)
+            debugLog_func('データチャンネル作成', { role: isHost ? 'host' : 'guest' });
+            dataChannel = peerConnection.createDataChannel('game', {
+                ordered: true,
+                maxRetransmits: 3
+            });
+            setupDataChannel();
             
-            // Handle incoming data channel
+            // Handle incoming data channel as backup
             peerConnection.ondatachannel = (event) => {
-                debugLog_func('データチャンネル受信（ゲスト）');
-                dataChannel = event.channel;
-                setupDataChannel();
+                debugLog_func('追加データチャンネル受信', {
+                    label: event.channel.label,
+                    readyState: event.channel.readyState
+                });
+                
+                // Use incoming channel if our channel isn't working
+                if (!dataChannel || dataChannel.readyState !== 'open') {
+                    debugLog_func('受信チャンネルに切り替え');
+                    dataChannel = event.channel;
+                    setupDataChannel();
+                }
             };
             
             // Handle ICE candidates
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
-                    debugLog_func('ICE候補送信', event.candidate);
+                    debugLog_func('ICE候補送信', {
+                        candidate: event.candidate.candidate.substring(0, 80) + '...',
+                        sdpMid: event.candidate.sdpMid,
+                        sdpMLineIndex: event.candidate.sdpMLineIndex
+                    });
                     sendSignalingMessage({
                         type: 'ice-candidate',
                         candidate: event.candidate
                     });
                 } else {
-                    debugLog_func('ICE候補収集完了');
+                    debugLog_func('ICE候補収集完了 - 最終候補');
                 }
             };
             
@@ -680,20 +699,63 @@
             
             // ICE connection state
             peerConnection.oniceconnectionstatechange = () => {
-                debugLog_func('ICE接続状態変更', peerConnection.iceConnectionState);
+                const iceState = peerConnection.iceConnectionState;
+                debugLog_func('ICE接続状態変更', iceState);
                 
-                if (peerConnection.iceConnectionState === 'connected' || 
-                    peerConnection.iceConnectionState === 'completed') {
-                    debugLog_func('ICE接続確立 - データチャンネル待機中');
-                } else if (peerConnection.iceConnectionState === 'failed') {
-                    debugLog_func('ICE接続失敗');
+                if (iceState === 'connected' || iceState === 'completed') {
+                    debugLog_func('ICE接続確立 - データチャンネル確認中');
+                    updateConnectionStatus('ICE接続確立 - データチャンネル確認中', 'status-connecting');
+                    
+                    // Force check data channel after ICE success
+                    setTimeout(() => {
+                        if (dataChannel) {
+                            debugLog_func('データチャンネル状態確認', {
+                                readyState: dataChannel.readyState,
+                                label: dataChannel.label
+                            });
+                            
+                            if (dataChannel.readyState === 'open') {
+                                debugLog_func('データチャンネル既に開通 - ゲーム開始');
+                                startOnlineGame();
+                            } else if (dataChannel.readyState === 'connecting') {
+                                debugLog_func('データチャンネル接続中 - 手動開始オプション表示');
+                                document.getElementById('manualStart').style.display = 'block';
+                            } else {
+                                debugLog_func('データチャンネル問題あり - 手動開始オプション表示');
+                                document.getElementById('manualStart').style.display = 'block';
+                            }
+                        }
+                    }, 2000);
+                    
+                } else if (iceState === 'failed') {
+                    debugLog_func('ICE接続失敗 - STUNサーバー問題の可能性');
                     updateConnectionStatus('ICE接続に失敗しました', 'status-disconnected');
+                    // Try to restart ICE
+                    setTimeout(() => {
+                        debugLog_func('ICE再開を試行');
+                        if (peerConnection) {
+                            peerConnection.restartIce();
+                        }
+                    }, 3000);
+                } else if (iceState === 'checking') {
+                    debugLog_func('ICE接続性確認中');
+                    updateConnectionStatus('接続性を確認中...', 'status-connecting');
+                } else if (iceState === 'disconnected') {
+                    debugLog_func('ICE接続が一時的に切断');
+                    updateConnectionStatus('接続が不安定です', 'status-connecting');
                 }
             };
             
             // ICE gathering state
             peerConnection.onicegatheringstatechange = () => {
-                debugLog_func('ICE収集状態変更', peerConnection.iceGatheringState);
+                const gatheringState = peerConnection.iceGatheringState;
+                debugLog_func('ICE収集状態変更', gatheringState);
+                
+                if (gatheringState === 'gathering') {
+                    updateConnectionStatus('ICE候補を収集中...', 'status-connecting');
+                } else if (gatheringState === 'complete') {
+                    debugLog_func('ICE候補収集完了');
+                }
             };
         }
         
@@ -735,6 +797,17 @@
                 updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
                 startOnlineGame();
             }
+            
+            // Fallback: Force start after 10 seconds if P2P seems to be working
+            setTimeout(() => {
+                if (!gameStarted && peerConnection && 
+                    (peerConnection.iceConnectionState === 'connected' || 
+                     peerConnection.iceConnectionState === 'completed')) {
+                    debugLog_func('フォールバック: P2P動作中のためゲーム強制開始');
+                    updateConnectionStatus('接続確立 - ゲーム開始', 'status-connected');
+                    startOnlineGame();
+                }
+            }, 10000);
         }
         
         async function createOffer() {
@@ -852,12 +925,44 @@
         }
         
         function startPingMonitoring() {
+            debugLog_func('Pingモニタリング開始');
             pingInterval = setInterval(() => {
                 if (dataChannel && dataChannel.readyState === 'open') {
                     lastPingTime = Date.now();
                     sendData({ type: 'ping', timestamp: lastPingTime });
                 }
             }, 1000);
+            
+            // Connection stats monitoring
+            if (peerConnection) {
+                setInterval(async () => {
+                    try {
+                        const stats = await peerConnection.getStats();
+                        let candidatePairs = 0;
+                        let connectedPairs = 0;
+                        
+                        stats.forEach(report => {
+                            if (report.type === 'candidate-pair') {
+                                candidatePairs++;
+                                if (report.state === 'succeeded') {
+                                    connectedPairs++;
+                                }
+                            }
+                        });
+                        
+                        if (candidatePairs > 0) {
+                            debugLog_func('接続統計', {
+                                candidatePairs,
+                                connectedPairs,
+                                connectionState: peerConnection.connectionState,
+                                iceConnectionState: peerConnection.iceConnectionState
+                            });
+                        }
+                    } catch (e) {
+                        // Stats not available
+                    }
+                }, 5000);
+            }
         }
         
         function sendData(data) {
@@ -1356,6 +1461,12 @@
             const isVisible = debugPanel.style.display !== 'none';
             debugPanel.style.display = isVisible ? 'none' : 'block';
             document.getElementById('debugToggle').textContent = isVisible ? 'デバッグ表示' : 'デバッグ非表示';
+        });
+        
+        document.getElementById('forceStartBtn').addEventListener('click', () => {
+            debugLog_func('手動ゲーム開始ボタンクリック');
+            document.getElementById('manualStart').style.display = 'none';
+            startOnlineGame();
         });
         
         // Initialize
