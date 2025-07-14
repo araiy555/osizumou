@@ -361,6 +361,9 @@
         let clientId = null;
         let lastPingTime = 0;
         let pingInterval = null;
+        let connectionTimeout = null;
+        let offerSent = false;
+        let answerReceived = false;
         
         // WebRTC configuration
         const rtcConfig = {
@@ -661,6 +664,7 @@
                 
                 if (state === 'connected') {
                     updateConnectionStatus('P2P接続成功！', 'status-connected');
+                    debugLog_func('P2P接続成功 - ゲーム開始準備');
                     startPingMonitoring();
                 } else if (state === 'disconnected' || state === 'failed') {
                     updateConnectionStatus('接続が切断されました', 'status-disconnected');
@@ -668,20 +672,40 @@
                     resetToInitialState();
                 } else if (state === 'connecting') {
                     updateConnectionStatus('P2P接続中...', 'status-connecting');
+                    debugLog_func('P2P接続中...');
+                } else if (state === 'new') {
+                    debugLog_func('新しいP2P接続を作成中');
                 }
             };
             
             // ICE connection state
             peerConnection.oniceconnectionstatechange = () => {
                 debugLog_func('ICE接続状態変更', peerConnection.iceConnectionState);
+                
+                if (peerConnection.iceConnectionState === 'connected' || 
+                    peerConnection.iceConnectionState === 'completed') {
+                    debugLog_func('ICE接続確立 - データチャンネル待機中');
+                } else if (peerConnection.iceConnectionState === 'failed') {
+                    debugLog_func('ICE接続失敗');
+                    updateConnectionStatus('ICE接続に失敗しました', 'status-disconnected');
+                }
+            };
+            
+            // ICE gathering state
+            peerConnection.onicegatheringstatechange = () => {
+                debugLog_func('ICE収集状態変更', peerConnection.iceGatheringState);
             };
         }
         
         function setupDataChannel() {
-            debugLog_func('データチャンネル設定開始');
+            debugLog_func('データチャンネル設定開始', {
+                label: dataChannel.label,
+                readyState: dataChannel.readyState,
+                ordered: dataChannel.ordered
+            });
             
             dataChannel.onopen = () => {
-                debugLog_func('データチャンネル開通');
+                debugLog_func('データチャンネル開通 - ゲーム開始！');
                 updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
                 startOnlineGame();
             };
@@ -704,6 +728,13 @@
                 updateConnectionStatus('データチャンネルが閉じられました', 'status-disconnected');
                 resetToInitialState();
             };
+            
+            // If channel is already open
+            if (dataChannel.readyState === 'open') {
+                debugLog_func('データチャンネルは既に開いています - ゲーム開始');
+                updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
+                startOnlineGame();
+            }
         }
         
         async function createOffer() {
@@ -711,11 +742,23 @@
                 debugLog_func('Offer作成開始');
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
-                debugLog_func('Offer送信', offer);
+                debugLog_func('Offer送信準備完了', { type: offer.type, sdp: offer.sdp.substring(0, 100) + '...' });
                 sendSignalingMessage({
                     type: 'offer',
                     offer: offer
                 });
+                offerSent = true;
+                debugLog_func('Offer送信完了');
+                
+                // Set timeout for answer
+                connectionTimeout = setTimeout(() => {
+                    if (!answerReceived) {
+                        debugLog_func('Answer受信タイムアウト - 接続を再試行');
+                        updateConnectionStatus('接続タイムアウト - 再試行中...', 'status-connecting');
+                        resetConnection();
+                    }
+                }, 15000); // 15秒タイムアウト
+                
             } catch (error) {
                 debugLog_func('Offer作成エラー', error);
                 console.error('オファー作成エラー:', error);
@@ -724,15 +767,17 @@
         
         async function handleOffer(offer) {
             try {
-                debugLog_func('Offer処理開始');
+                debugLog_func('Offer処理開始', { type: offer.type, sdp: offer.sdp.substring(0, 100) + '...' });
                 await peerConnection.setRemoteDescription(offer);
+                debugLog_func('RemoteDescription設定完了');
                 const answer = await peerConnection.createAnswer();
                 await peerConnection.setLocalDescription(answer);
-                debugLog_func('Answer送信', answer);
+                debugLog_func('Answer作成完了', { type: answer.type, sdp: answer.sdp.substring(0, 100) + '...' });
                 sendSignalingMessage({
                     type: 'answer',
                     answer: answer
                 });
+                debugLog_func('Answer送信完了');
             } catch (error) {
                 debugLog_func('Offer処理エラー', error);
                 console.error('オファー処理エラー:', error);
@@ -741,23 +786,68 @@
         
         async function handleAnswer(answer) {
             try {
-                debugLog_func('Answer処理開始');
+                debugLog_func('Answer処理開始', { type: answer.type, sdp: answer.sdp.substring(0, 100) + '...' });
                 await peerConnection.setRemoteDescription(answer);
-                debugLog_func('Answer処理完了');
+                answerReceived = true;
+                
+                if (connectionTimeout) {
+                    clearTimeout(connectionTimeout);
+                    connectionTimeout = null;
+                }
+                
+                debugLog_func('Answer処理完了 - P2P接続確立中');
             } catch (error) {
                 debugLog_func('Answer処理エラー', error);
                 console.error('アンサー処理エラー:', error);
             }
         }
         
+        function resetConnection() {
+            debugLog_func('接続リセット実行');
+            
+            if (connectionTimeout) {
+                clearTimeout(connectionTimeout);
+                connectionTimeout = null;
+            }
+            
+            offerSent = false;
+            answerReceived = false;
+            
+            if (peerConnection) {
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            if (dataChannel) {
+                dataChannel.close();
+                dataChannel = null;
+            }
+            
+            // Retry connection
+            setTimeout(async () => {
+                if (isHost) {
+                    debugLog_func('ホスト側接続再試行');
+                    await createPeerConnection();
+                } else {
+                    debugLog_func('ゲスト側接続再試行');
+                    await createPeerConnection();
+                    await createOffer();
+                }
+            }, 2000);
+        }
+        
         async function handleIceCandidate(candidate) {
             try {
-                debugLog_func('ICE候補追加');
+                debugLog_func('ICE候補追加開始', {
+                    candidate: candidate.candidate ? candidate.candidate.substring(0, 50) + '...' : 'null',
+                    sdpMid: candidate.sdpMid,
+                    sdpMLineIndex: candidate.sdpMLineIndex
+                });
                 await peerConnection.addIceCandidate(candidate);
                 debugLog_func('ICE候補追加完了');
             } catch (error) {
-                debugLog_func('ICE候補処理エラー', error);
-                console.error('ICE候補処理エラー:', error);
+                // ICE候補の追加失敗は一般的なことなので、エラーとして扱わない
+                debugLog_func('ICE候補処理スキップ', { error: error.message, candidate });
             }
         }
         
@@ -814,6 +904,7 @@
         
         // Game functions
         function startOnlineGame() {
+            debugLog_func('オンラインゲーム開始', { isHost, isOnline: true });
             isOnline = true;
             gameStarted = true;
             gameState = 'playing';
@@ -827,11 +918,17 @@
             if (!isHost) {
                 player1.color = '#4444FF';
                 player2.color = '#FF4444';
-                player1.name = 'あなた';
-                player2.name = '相手';
+                player1.name = 'あなた (ゲスト)';
+                player2.name = '相手 (ホスト)';
+                debugLog_func('プレイヤー役割設定 - ゲスト');
+            } else {
+                player1.name = 'あなた (ホスト)';
+                player2.name = '相手 (ゲスト)';
+                debugLog_func('プレイヤー役割設定 - ホスト');
             }
             
             resetGame();
+            debugLog_func('ゲーム画面表示完了');
         }
         
         function startDemoGame() {
