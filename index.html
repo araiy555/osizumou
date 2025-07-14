@@ -967,11 +967,23 @@
         
         function sendData(data) {
             if (dataChannel && dataChannel.readyState === 'open') {
+                debugLog_func('データ送信', {
+                    type: data.type,
+                    player: data.player || 'unknown',
+                    position: data.x ? { x: data.x, y: data.y } : 'no position'
+                });
                 dataChannel.send(JSON.stringify(data));
+            } else {
+                debugLog_func('データ送信失敗', {
+                    channelExists: !!dataChannel,
+                    readyState: dataChannel?.readyState
+                });
             }
         }
         
         function handleRemoteMessage(data) {
+            debugLog_func('リモートメッセージ受信', data);
+            
             switch (data.type) {
                 case 'ping':
                     sendData({ type: 'pong', timestamp: data.timestamp });
@@ -983,13 +995,31 @@
                     break;
                     
                 case 'player-state':
-                    const remotePlayer = isHost ? player2 : player1;
-                    remotePlayer.x = data.x;
-                    remotePlayer.y = data.y;
-                    remotePlayer.vx = data.vx;
-                    remotePlayer.vy = data.vy;
-                    remotePlayer.pushing = data.pushing;
-                    remotePlayer.pushCooldown = data.pushCooldown;
+                    // Determine which player to update based on sender
+                    let targetPlayer;
+                    
+                    if (data.player === 'player1') {
+                        targetPlayer = player1;
+                    } else if (data.player === 'player2') {
+                        targetPlayer = player2;
+                    } else {
+                        // Legacy fallback - use host/guest logic
+                        targetPlayer = isHost ? player2 : player1;
+                    }
+                    
+                    debugLog_func('プレイヤー状態更新', {
+                        targetPlayer: data.player || 'legacy',
+                        senderIsHost: data.isHost,
+                        receiverIsHost: isHost,
+                        position: { x: data.x, y: data.y }
+                    });
+                    
+                    targetPlayer.x = data.x;
+                    targetPlayer.y = data.y;
+                    targetPlayer.vx = data.vx;
+                    targetPlayer.vy = data.vy;
+                    targetPlayer.pushing = data.pushing;
+                    targetPlayer.pushCooldown = data.pushCooldown;
                     break;
                     
                 case 'game-state':
@@ -1019,17 +1049,39 @@
             powerMeter.style.display = 'block';
             pingDisplay.style.display = 'block';
             
-            // Set player roles
-            if (!isHost) {
-                player1.color = '#4444FF';
-                player2.color = '#FF4444';
-                player1.name = 'あなた (ゲスト)';
-                player2.name = '相手 (ホスト)';
-                debugLog_func('プレイヤー役割設定 - ゲスト');
-            } else {
+            // Set player roles and colors clearly
+            if (isHost) {
+                // Host controls player1 (left side, red)
+                player1.color = '#FF4444';
                 player1.name = 'あなた (ホスト)';
+                player1.x = 180;
+                player1.y = 250;
+                
+                player2.color = '#4444FF';
                 player2.name = '相手 (ゲスト)';
-                debugLog_func('プレイヤー役割設定 - ホスト');
+                player2.x = 320;
+                player2.y = 250;
+                
+                debugLog_func('プレイヤー役割設定 - ホスト', {
+                    myPlayer: 'player1 (red, left)',
+                    remotePlayer: 'player2 (blue, right)'
+                });
+            } else {
+                // Guest controls player2 (right side, blue)
+                player1.color = '#FF4444';
+                player1.name = '相手 (ホスト)';
+                player1.x = 180;
+                player1.y = 250;
+                
+                player2.color = '#4444FF';
+                player2.name = 'あなた (ゲスト)';
+                player2.x = 320;
+                player2.y = 250;
+                
+                debugLog_func('プレイヤー役割設定 - ゲスト', {
+                    myPlayer: 'player2 (blue, right)',
+                    remotePlayer: 'player1 (red, left)'
+                });
             }
             
             resetGame();
@@ -1115,7 +1167,15 @@
         function handleInput() {
             if (gameState !== 'playing') return;
             
+            // Determine which player this client controls
             const myPlayer = isHost ? player1 : player2;
+            const myPlayerName = isHost ? 'player1' : 'player2';
+            
+            debugLog_func('入力処理', { 
+                isHost, 
+                myPlayerName,
+                keys: Object.keys(keys).filter(k => keys[k])
+            });
             
             // Movement
             if (keys['w']) myPlayer.vy -= PLAYER_SPEED;
@@ -1127,6 +1187,7 @@
             if (mouseButtons[0] && !isCharging && myPlayer.pushCooldown <= 0) {
                 isCharging = true;
                 pushPower = 0;
+                debugLog_func('突っ張りチャージ開始');
             }
             
             if (isCharging) {
@@ -1139,6 +1200,7 @@
                 isCharging = false;
                 myPlayer.pushing = true;
                 myPlayer.pushCooldown = 30 + pushPower * 0.5;
+                debugLog_func('突っ張り実行', { pushPower });
                 
                 if (pushPower > 50) {
                     for (let i = 0; i < 5; i++) {
@@ -1152,15 +1214,19 @@
             
             // Send state to remote player
             if (isOnline && Date.now() - lastSyncTime > 16) { // ~60fps sync
-                sendData({
+                const stateData = {
                     type: 'player-state',
+                    player: myPlayerName,
                     x: myPlayer.x,
                     y: myPlayer.y,
                     vx: myPlayer.vx,
                     vy: myPlayer.vy,
                     pushing: myPlayer.pushing,
-                    pushCooldown: myPlayer.pushCooldown
-                });
+                    pushCooldown: myPlayer.pushCooldown,
+                    isHost: isHost
+                };
+                
+                sendData(stateData);
                 lastSyncTime = Date.now();
             }
         }
@@ -1364,11 +1430,14 @@
                 }
                 
                 if (gameState === 'playing') {
-                    // Only host handles physics in online mode
+                    // Only host handles physics in online mode, but both handle local player movement
                     if (!isOnline || isHost) {
                         handleCollision();
                         updatePhysics();
                         checkWinner();
+                    } else {
+                        // Guest only handles their own player's physics
+                        updateLocalPlayerPhysics();
                     }
                 } else if (gameState === 'winner') {
                     winnerTimer--;
@@ -1381,6 +1450,19 @@
             }
             
             requestAnimationFrame(gameLoop);
+        }
+        
+        function updateLocalPlayerPhysics() {
+            // Guest only updates their own player (player2)
+            const myPlayer = player2;
+            
+            myPlayer.vx *= FRICTION;
+            myPlayer.vy *= FRICTION;
+            myPlayer.x += myPlayer.vx;
+            myPlayer.y += myPlayer.vy;
+            
+            if (myPlayer.pushCooldown > 0) myPlayer.pushCooldown--;
+            myPlayer.pushing = false;
         }
         
         // Event listeners
