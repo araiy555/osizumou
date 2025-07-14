@@ -266,6 +266,26 @@
             color: white;
             display: none;
         }
+        
+        .debug-panel {
+            background: rgba(0,0,0,0.8);
+            color: #00ff00;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            border-radius: 5px;
+            margin-top: 20px;
+            max-width: 500px;
+            max-height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+        
+        .debug-toggle {
+            background: linear-gradient(45deg, #333, #555);
+            font-size: 12px;
+            padding: 5px 10px;
+        }
     </style>
 </head>
 <body>
@@ -276,6 +296,7 @@
             <button class="btn" id="createRoomBtn">ルーム作成</button>
             <button class="btn" id="joinRoomBtn">ルーム参加</button>
             <button class="btn btn-demo" id="demoBtn">デモモード</button>
+            <button class="btn debug-toggle" id="debugToggle">デバッグ表示</button>
         </div>
         
         <div id="roomCodeSection" style="display: none; text-align: center;">
@@ -291,6 +312,10 @@
         </div>
         
         <div id="connectionStatus" class="status-disconnected">接続待機中...</div>
+        
+        <div id="debugPanel" class="debug-panel">
+            <div id="debugLog"></div>
+        </div>
     </div>
     
     <div id="gameContainer">
@@ -322,6 +347,10 @@
     </div>
 
     <script>
+        // Configuration
+        const SIGNALING_URL = 'wss://osizumou.onrender.com';
+        const DEBUG = true;
+        
         // P2P connection variables
         let isHost = false;
         let isOnline = false;
@@ -332,13 +361,6 @@
         let clientId = null;
         let lastPingTime = 0;
         let pingInterval = null;
-        
-        // Simple signaling server using WebSocket
-        // For production, you'd use a proper signaling server
-        const signalingServers = [
-            'wss://echo.websocket.org',
-            'wss://socketsbay.com/wss/v2/1/demo/'
-        ];
         
         // WebRTC configuration
         const rtcConfig = {
@@ -413,6 +435,23 @@
         const powerMeter = document.getElementById('powerMeter');
         const powerBar = document.getElementById('powerBar');
         const pingDisplay = document.getElementById('pingDisplay');
+        const debugPanel = document.getElementById('debugPanel');
+        const debugLog = document.getElementById('debugLog');
+        
+        // Debug functions
+        function debugLog_func(message, data = null) {
+            if (DEBUG) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = `[${timestamp}] ${message}`;
+                console.log(logEntry, data || '');
+                
+                // Add to debug panel
+                const logDiv = document.createElement('div');
+                logDiv.textContent = data ? `${logEntry} ${JSON.stringify(data)}` : logEntry;
+                debugLog.appendChild(logDiv);
+                debugLog.scrollTop = debugLog.scrollHeight;
+            }
+        }
         
         // Utility functions
         function distance(a, b) {
@@ -423,15 +462,6 @@
             const len = Math.sqrt(vector.x ** 2 + vector.y ** 2);
             if (len === 0) return { x: 0, y: 0 };
             return { x: vector.x / len, y: vector.y / len };
-        }
-        
-        function generateRoomCode() {
-            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-            let result = '';
-            for (let i = 0; i < 6; i++) {
-                result += chars.charAt(Math.floor(Math.random() * chars.length));
-            }
-            return result;
         }
         
         function copyToClipboard(text) {
@@ -468,39 +498,42 @@
         function connectToSignalingServer() {
             return new Promise((resolve, reject) => {
                 updateConnectionStatus('シグナリングサーバーに接続中...', 'status-connecting');
+                debugLog_func('シグナリングサーバーへの接続を開始', SIGNALING_URL);
                 
-                // Use a simple echo server for signaling
-                signalingSocket = new WebSocket('wss://echo.websocket.org');
+                signalingSocket = new WebSocket(SIGNALING_URL);
                 
                 signalingSocket.onopen = () => {
                     updateConnectionStatus('シグナリングサーバーに接続完了', 'status-connected');
                     clientId = Math.random().toString(36).substring(2, 15);
+                    debugLog_func('シグナリングサーバーに接続成功', { clientId });
                     resolve();
                 };
                 
-                signalingSocket.onmessage = (event) => {
+                signalingSocket.onmessage = async (event) => {
                     try {
                         const message = JSON.parse(event.data);
-                        if (message.roomCode === roomCode || message.targetRoom === roomCode) {
-                            handleSignalingMessage(message);
-                        }
+                        debugLog_func('受信メッセージ', message);
+                        await handleSignalingMessage(message);
                     } catch (e) {
-                        // Ignore invalid messages
+                        console.error('メッセージ解析エラー:', e);
+                        debugLog_func('メッセージ解析失敗', { error: e.message, data: event.data });
                     }
                 };
                 
-                signalingSocket.onclose = () => {
+                signalingSocket.onclose = (event) => {
                     updateConnectionStatus('シグナリングサーバーから切断', 'status-disconnected');
+                    debugLog_func('シグナリングサーバーから切断', { code: event.code, reason: event.reason });
                     if (isOnline) {
-                        // Try to reconnect
+                        debugLog_func('3秒後に再接続を試行');
                         setTimeout(() => {
-                            connectToSignalingServer();
+                            connectToSignalingServer().catch(console.error);
                         }, 3000);
                     }
                 };
                 
                 signalingSocket.onerror = (error) => {
                     updateConnectionStatus('接続エラー', 'status-disconnected');
+                    debugLog_func('シグナリングサーバーエラー', error);
                     reject(error);
                 };
             });
@@ -508,49 +541,93 @@
         
         function sendSignalingMessage(message) {
             if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                message.roomCode = roomCode;
                 message.clientId = clientId;
                 message.timestamp = Date.now();
+                debugLog_func('送信メッセージ', message);
                 signalingSocket.send(JSON.stringify(message));
+            } else {
+                debugLog_func('送信失敗 - WebSocket未接続', { 
+                    readyState: signalingSocket?.readyState,
+                    message 
+                });
             }
         }
         
         async function handleSignalingMessage(message) {
-            if (message.clientId === clientId) return; // Ignore own messages
+            debugLog_func('メッセージ処理開始', message);
             
             switch (message.type) {
-                case 'join-room':
-                    if (isHost && message.targetRoom === roomCode) {
-                        updateConnectionStatus('相手が参加しました - 接続開始', 'status-connecting');
-                        await initiatePeerConnection();
-                    }
+                case 'connected':
+                    clientId = message.clientId;
+                    debugLog_func('サーバーからクライアントID受信', clientId);
+                    break;
+                    
+                case 'roomCreated':
+                    roomCode = message.roomCode;
+                    roomCodeDiv.textContent = roomCode;
+                    roomCodeSection.style.display = 'block';
+                    joinSection.style.display = 'none';
+                    updateConnectionStatus('ルーム作成完了 - 相手を待機中', 'status-connecting');
+                    debugLog_func('ルーム作成完了', { roomCode, role: message.role });
+                    break;
+                    
+                case 'roomJoined':
+                    updateConnectionStatus('ルーム参加完了 - 接続を開始', 'status-connecting');
+                    debugLog_func('ルーム参加完了 - P2P接続開始');
+                    await createPeerConnection();
+                    await createOffer();
+                    break;
+                    
+                case 'guestJoined':
+                    updateConnectionStatus('相手が参加しました - 接続を開始', 'status-connecting');
+                    debugLog_func('ゲスト参加 - P2P接続開始');
+                    await createPeerConnection();
                     break;
                     
                 case 'offer':
-                    if (!isHost) {
-                        await handleOffer(message.offer);
-                    }
+                    debugLog_func('Offer受信', message.offer);
+                    await handleOffer(message.offer);
                     break;
                     
                 case 'answer':
-                    if (isHost) {
-                        await handleAnswer(message.answer);
-                    }
+                    debugLog_func('Answer受信', message.answer);
+                    await handleAnswer(message.answer);
                     break;
                     
                 case 'ice-candidate':
-                    if (message.candidate) {
-                        await handleIceCandidate(message.candidate);
-                    }
+                    debugLog_func('ICE候補受信', message.candidate);
+                    await handleIceCandidate(message.candidate);
+                    break;
+                    
+                case 'error':
+                    updateConnectionStatus(`エラー: ${message.message}`, 'status-disconnected');
+                    debugLog_func('サーバーエラー', message.message);
+                    break;
+                    
+                case 'hostLeft':
+                case 'guestLeft':
+                    updateConnectionStatus(message.message, 'status-disconnected');
+                    debugLog_func('相手が退出', message.message);
+                    resetToInitialState();
+                    break;
+                    
+                case 'pong':
+                    // Ping応答の処理
+                    break;
+                    
+                default:
+                    debugLog_func('未知のメッセージタイプ', message);
                     break;
             }
         }
         
         async function createPeerConnection() {
+            debugLog_func('P2P接続作成開始');
             peerConnection = new RTCPeerConnection(rtcConfig);
             
             // Create data channel (host only)
             if (isHost) {
+                debugLog_func('データチャンネル作成（ホスト）');
                 dataChannel = peerConnection.createDataChannel('game', {
                     ordered: true
                 });
@@ -559,6 +636,7 @@
             
             // Handle incoming data channel
             peerConnection.ondatachannel = (event) => {
+                debugLog_func('データチャンネル受信（ゲスト）');
                 dataChannel = event.channel;
                 setupDataChannel();
             };
@@ -566,77 +644,120 @@
             // Handle ICE candidates
             peerConnection.onicecandidate = (event) => {
                 if (event.candidate) {
+                    debugLog_func('ICE候補送信', event.candidate);
                     sendSignalingMessage({
                         type: 'ice-candidate',
                         candidate: event.candidate
                     });
+                } else {
+                    debugLog_func('ICE候補収集完了');
                 }
             };
             
             // Monitor connection state
             peerConnection.onconnectionstatechange = () => {
                 const state = peerConnection.connectionState;
+                debugLog_func('P2P接続状態変更', state);
+                
                 if (state === 'connected') {
                     updateConnectionStatus('P2P接続成功！', 'status-connected');
                     startPingMonitoring();
                 } else if (state === 'disconnected' || state === 'failed') {
                     updateConnectionStatus('接続が切断されました', 'status-disconnected');
+                    debugLog_func('P2P接続失敗/切断');
                     resetToInitialState();
+                } else if (state === 'connecting') {
+                    updateConnectionStatus('P2P接続中...', 'status-connecting');
                 }
+            };
+            
+            // ICE connection state
+            peerConnection.oniceconnectionstatechange = () => {
+                debugLog_func('ICE接続状態変更', peerConnection.iceConnectionState);
             };
         }
         
         function setupDataChannel() {
+            debugLog_func('データチャンネル設定開始');
+            
             dataChannel.onopen = () => {
+                debugLog_func('データチャンネル開通');
                 updateConnectionStatus('ゲーム開始準備完了！', 'status-connected');
                 startOnlineGame();
             };
             
             dataChannel.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                handleRemoteMessage(data);
+                try {
+                    const data = JSON.parse(event.data);
+                    handleRemoteMessage(data);
+                } catch (e) {
+                    debugLog_func('データチャンネルメッセージ解析エラー', e);
+                }
             };
             
             dataChannel.onerror = (error) => {
-                console.error('データチャンネルエラー:', error);
+                debugLog_func('データチャンネルエラー', error);
             };
             
             dataChannel.onclose = () => {
+                debugLog_func('データチャンネル閉鎖');
                 updateConnectionStatus('データチャンネルが閉じられました', 'status-disconnected');
                 resetToInitialState();
             };
         }
         
-        async function initiatePeerConnection() {
-            await createPeerConnection();
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            sendSignalingMessage({
-                type: 'offer',
-                offer: offer
-            });
+        async function createOffer() {
+            try {
+                debugLog_func('Offer作成開始');
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                debugLog_func('Offer送信', offer);
+                sendSignalingMessage({
+                    type: 'offer',
+                    offer: offer
+                });
+            } catch (error) {
+                debugLog_func('Offer作成エラー', error);
+                console.error('オファー作成エラー:', error);
+            }
         }
         
         async function handleOffer(offer) {
-            await createPeerConnection();
-            await peerConnection.setRemoteDescription(offer);
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-            sendSignalingMessage({
-                type: 'answer',
-                answer: answer
-            });
+            try {
+                debugLog_func('Offer処理開始');
+                await peerConnection.setRemoteDescription(offer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+                debugLog_func('Answer送信', answer);
+                sendSignalingMessage({
+                    type: 'answer',
+                    answer: answer
+                });
+            } catch (error) {
+                debugLog_func('Offer処理エラー', error);
+                console.error('オファー処理エラー:', error);
+            }
         }
         
         async function handleAnswer(answer) {
-            await peerConnection.setRemoteDescription(answer);
+            try {
+                debugLog_func('Answer処理開始');
+                await peerConnection.setRemoteDescription(answer);
+                debugLog_func('Answer処理完了');
+            } catch (error) {
+                debugLog_func('Answer処理エラー', error);
+                console.error('アンサー処理エラー:', error);
+            }
         }
         
         async function handleIceCandidate(candidate) {
             try {
+                debugLog_func('ICE候補追加');
                 await peerConnection.addIceCandidate(candidate);
+                debugLog_func('ICE候補追加完了');
             } catch (error) {
-                console.error('ICE候補追加エラー:', error);
+                debugLog_func('ICE候補処理エラー', error);
+                console.error('ICE候補処理エラー:', error);
             }
         }
         
@@ -1086,20 +1207,20 @@
         // Connection button handlers
         document.getElementById('createRoomBtn').addEventListener('click', async () => {
             try {
+                debugLog_func('ルーム作成ボタンクリック');
                 isHost = true;
-                roomCode = generateRoomCode();
-                roomCodeDiv.textContent = roomCode;
-                roomCodeSection.style.display = 'block';
-                joinSection.style.display = 'none';
-                
                 await connectToSignalingServer();
-                updateConnectionStatus('ルーム作成完了 - 相手を待機中', 'status-connecting');
+                debugLog_func('シグナリングサーバー接続完了 - ルーム作成要求送信');
+                sendSignalingMessage({ type: 'createRoom' });
             } catch (error) {
                 updateConnectionStatus('ルーム作成に失敗しました', 'status-disconnected');
+                debugLog_func('ルーム作成エラー', error);
+                console.error('ルーム作成エラー:', error);
             }
         });
         
         document.getElementById('joinRoomBtn').addEventListener('click', () => {
+            debugLog_func('ルーム参加ボタンクリック');
             isHost = false;
             joinSection.style.display = 'block';
             roomCodeSection.style.display = 'none';
@@ -1107,27 +1228,41 @@
         
         document.getElementById('connectBtn').addEventListener('click', async () => {
             const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
+            debugLog_func('接続ボタンクリック', { roomCode: code });
+            
             if (code.length === 6) {
                 try {
                     roomCode = code;
                     await connectToSignalingServer();
-                    updateConnectionStatus('ルームに参加中...', 'status-connecting');
-                    
+                    debugLog_func('シグナリングサーバー接続完了 - ルーム参加要求送信');
                     sendSignalingMessage({
-                        type: 'join-room',
-                        targetRoom: roomCode
+                        type: 'joinRoom',
+                        roomCode: code
                     });
                 } catch (error) {
                     updateConnectionStatus('ルーム参加に失敗しました', 'status-disconnected');
+                    debugLog_func('ルーム参加エラー', error);
+                    console.error('ルーム参加エラー:', error);
                 }
             } else {
                 updateConnectionStatus('正しいルームコードを入力してください', 'status-disconnected');
+                debugLog_func('無効なルームコード', code);
             }
         });
         
         document.getElementById('demoBtn').addEventListener('click', () => {
+            debugLog_func('デモモードボタンクリック');
             startDemoGame();
+        });
+        
+        document.getElementById('debugToggle').addEventListener('click', () => {
+            const isVisible = debugPanel.style.display !== 'none';
+            debugPanel.style.display = isVisible ? 'none' : 'block';
+            document.getElementById('debugToggle').textContent = isVisible ? 'デバッグ表示' : 'デバッグ非表示';
         });
         
         // Initialize
         gameLoop();
+    </script>
+</body>
+</html>
