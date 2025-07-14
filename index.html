@@ -34,6 +34,12 @@
             background: radial-gradient(circle, #DEB887 0%, #CD853F 70%, #8B4513 100%);
             box-shadow: 0 0 30px rgba(0,0,0,0.5);
             display: none;
+            animation: fadeIn 0.5s ease-in-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.8); }
+            to { opacity: 1; transform: scale(1); }
         }
         
         #gameCanvas {
@@ -53,6 +59,11 @@
             background: rgba(0,0,0,0.3);
             border-radius: 10px;
             backdrop-filter: blur(5px);
+            transition: transform 0.2s ease;
+        }
+        
+        .player-info:hover {
+            transform: scale(1.05);
         }
         
         .controls {
@@ -67,6 +78,12 @@
         h1 {
             text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
             margin-bottom: 20px;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.02); }
         }
         
         .winner {
@@ -75,6 +92,12 @@
             color: #FFD700;
             text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
             margin: 20px 0;
+            animation: winnerGlow 1s ease-in-out infinite alternate;
+        }
+        
+        @keyframes winnerGlow {
+            from { text-shadow: 0 0 10px #FFD700; }
+            to { text-shadow: 0 0 20px #FFD700, 0 0 30px #FFD700; }
         }
         
         .btn {
@@ -95,9 +118,14 @@
             box-shadow: 0 6px 20px rgba(0,0,0,0.4);
         }
         
+        .btn:active {
+            transform: translateY(0);
+        }
+        
         .btn:disabled {
             opacity: 0.5;
             cursor: not-allowed;
+            transform: none;
         }
         
         input[type="text"] {
@@ -108,6 +136,12 @@
             width: 200px;
             margin: 10px;
             text-align: center;
+            transition: box-shadow 0.2s ease;
+        }
+        
+        input[type="text"]:focus {
+            box-shadow: 0 0 10px rgba(255,255,255,0.5);
+            outline: none;
         }
         
         #connectionStatus {
@@ -116,11 +150,38 @@
             padding: 10px;
             border-radius: 10px;
             background: rgba(0,0,0,0.2);
+            transition: all 0.3s ease;
         }
         
-        .status-disconnected { color: #ff6b6b; }
-        .status-connecting { color: #ffd93d; }
-        .status-connected { color: #6bcf7f; }
+        .status-disconnected { 
+            color: #ff6b6b; 
+            animation: statusBlink 2s infinite;
+        }
+        
+        .status-connecting { 
+            color: #ffd93d; 
+            animation: statusPulse 1s infinite;
+        }
+        
+        .status-connected { 
+            color: #6bcf7f; 
+            animation: statusGlow 2s infinite;
+        }
+        
+        @keyframes statusBlink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0.5; }
+        }
+        
+        @keyframes statusPulse {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.05); }
+        }
+        
+        @keyframes statusGlow {
+            0%, 100% { box-shadow: 0 0 5px rgba(107, 207, 127, 0.3); }
+            50% { box-shadow: 0 0 15px rgba(107, 207, 127, 0.6); }
+        }
         
         #roomCode {
             font-family: monospace;
@@ -130,6 +191,56 @@
             border-radius: 10px;
             margin: 10px 0;
             letter-spacing: 2px;
+            border: 2px solid rgba(255,255,255,0.3);
+            transition: all 0.3s ease;
+        }
+        
+        #roomCode:hover {
+            background: rgba(255,255,255,0.2);
+            border-color: rgba(255,255,255,0.5);
+        }
+        
+        #powerMeter {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            width: 100px;
+            height: 20px;
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            border: 2px solid rgba(255,255,255,0.3);
+            display: none;
+        }
+        
+        #powerBar {
+            height: 100%;
+            background: linear-gradient(90deg, #4CAF50, #FFD700, #FF4444);
+            border-radius: 8px;
+            transition: width 0.1s ease;
+        }
+        
+        .particle {
+            position: absolute;
+            width: 4px;
+            height: 4px;
+            background: #FFD700;
+            border-radius: 50%;
+            pointer-events: none;
+            animation: particleFloat 1s linear forwards;
+        }
+        
+        @keyframes particleFloat {
+            0% { transform: translateY(0) scale(1); opacity: 1; }
+            100% { transform: translateY(-50px) scale(0); opacity: 0; }
+        }
+        
+        .ring-glow {
+            animation: ringGlow 3s ease-in-out infinite;
+        }
+        
+        @keyframes ringGlow {
+            0%, 100% { box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+            50% { box-shadow: 0 0 40px rgba(255,215,0,0.3); }
         }
     </style>
 </head>
@@ -144,8 +255,8 @@
         
         <div id="roomCodeSection" style="display: none; text-align: center;">
             <p>ルームコード:</p>
-            <div id="roomCode">-</div>
-            <p>友達にこのコードを教えてください</p>
+            <div id="roomCode" onclick="copyToClipboard(this.textContent)">-</div>
+            <p>友達にこのコードを教えてください<br><small>（コードをクリックでコピー）</small></p>
         </div>
         
         <div id="joinSection" style="display: none; text-align: center;">
@@ -159,6 +270,9 @@
     
     <div id="gameContainer">
         <canvas id="gameCanvas" width="500" height="500"></canvas>
+        <div id="powerMeter">
+            <div id="powerBar" style="width: 0%"></div>
+        </div>
     </div>
     
     <div id="ui">
@@ -177,39 +291,33 @@
     <div class="controls">
         <strong>操作方法:</strong><br>
         WASD移動 + 左クリック突っ張り<br>
-        <em>土俵外に押し出されたら負け！</em>
+        <em>土俵外に押し出されたら負け！</em><br>
+        <small>左クリック長押しで強い突っ張り</small>
     </div>
 
     <script>
-        // シグナリングサーバーのURL
-        const signalingUrl = 'wss://osizumou.onrender.com';
+        // Demo mode - no actual P2P connection
+        const DEMO_MODE = true;
         
-        // P2P通信用の変数
-        let isHost = false;
-        let dataChannel = null;
-        let peerConnection = null;
-        let roomCode = null;
-        let signalingSocket = null;
-        let clientId = null;
-        
-        // WebRTC設定
-        const rtcConfig = {
-            iceServers: [
-                { urls: 'stun:stun.l.google.com:19302' },
-                { urls: 'stun:stun1.l.google.com:19302' },
-                { urls: 'stun:stun2.l.google.com:19302' }
-            ]
-        };
-        
-        // ゲーム設定
+        // Game configuration
         const RING_RADIUS = 200;
         const RING_CENTER = { x: 250, y: 250 };
         const PLAYER_SIZE = 25;
         const PUSH_FORCE = 8;
         const FRICTION = 0.85;
         const PLAYER_SPEED = 3;
+        const MAX_POWER = 100;
         
-        // プレイヤー
+        // Game state
+        let gameState = 'demo';
+        let gameStarted = false;
+        let winner = null;
+        let winnerTimer = 0;
+        let pushPower = 0;
+        let isCharging = false;
+        let particles = [];
+        
+        // Players
         let player1 = {
             x: 180,
             y: 250,
@@ -219,7 +327,8 @@
             name: 'あなた',
             wins: 0,
             pushing: false,
-            pushCooldown: 0
+            pushCooldown: 0,
+            isAI: false
         };
         
         let player2 = {
@@ -228,335 +337,28 @@
             vx: 0,
             vy: 0,
             color: '#4444FF',
-            name: '相手',
+            name: 'CPU',
             wins: 0,
             pushing: false,
-            pushCooldown: 0
+            pushCooldown: 0,
+            isAI: true,
+            aiTimer: 0
         };
         
-        // 入力状態
+        // Input state
         let keys = {};
         let mouseButtons = {};
         
-        // ゲーム状態
-        let gameState = 'waiting';
-        let winner = null;
-        let winnerTimer = 0;
-        let gameStarted = false;
-        
-        // DOM要素
+        // DOM elements
         const canvas = document.getElementById('gameCanvas');
         const ctx = canvas.getContext('2d');
         const connectionPanel = document.getElementById('connectionPanel');
         const gameContainer = document.getElementById('gameContainer');
         const connectionStatus = document.getElementById('connectionStatus');
-        const roomCodeDiv = document.getElementById('roomCode');
-        const roomCodeSection = document.getElementById('roomCodeSection');
-        const joinSection = document.getElementById('joinSection');
+        const powerMeter = document.getElementById('powerMeter');
+        const powerBar = document.getElementById('powerBar');
         
-        // 接続状態更新
-        function updateConnectionStatus(status, className) {
-            connectionStatus.textContent = status;
-            connectionStatus.className = className;
-        }
-        
-        // シグナリングサーバーに接続
-        function connectToSignalingServer() {
-            updateConnectionStatus('シグナリングサーバーに接続中...', 'status-connecting');
-            
-            signalingSocket = new WebSocket(signalingUrl);
-            
-            signalingSocket.onopen = () => {
-                updateConnectionStatus('シグナリングサーバーに接続完了', 'status-connected');
-                console.log('シグナリングサーバーに接続しました');
-            };
-            
-            signalingSocket.onmessage = async (event) => {
-                const message = JSON.parse(event.data);
-                await handleSignalingMessage(message);
-            };
-            
-            signalingSocket.onclose = () => {
-                updateConnectionStatus('シグナリングサーバーから切断されました', 'status-disconnected');
-                console.log('シグナリングサーバーから切断されました');
-                // 再接続を試行
-                setTimeout(connectToSignalingServer, 3000);
-            };
-            
-            signalingSocket.onerror = (error) => {
-                updateConnectionStatus('シグナリングサーバーエラー', 'status-disconnected');
-                console.error('シグナリングサーバーエラー:', error);
-            };
-        }
-        
-        // シグナリングメッセージ処理
-        async function handleSignalingMessage(message) {
-            console.log('シグナリングメッセージ受信:', message);
-            
-            switch (message.type) {
-                case 'connected':
-                    clientId = message.clientId;
-                    console.log('クライアントID:', clientId);
-                    break;
-                    
-                case 'roomCreated':
-                    roomCode = message.roomCode;
-                    roomCodeDiv.textContent = roomCode;
-                    roomCodeSection.style.display = 'block';
-                    joinSection.style.display = 'none';
-                    updateConnectionStatus('ルーム作成完了 - 相手を待機中', 'status-connecting');
-                    break;
-                    
-                case 'roomJoined':
-                    updateConnectionStatus('ルーム参加完了 - 接続を開始', 'status-connecting');
-                    await createPeerConnection();
-                    await createOffer();
-                    break;
-                    
-                case 'guestJoined':
-                    updateConnectionStatus('相手が参加しました - 接続を開始', 'status-connecting');
-                    await createPeerConnection();
-                    break;
-                    
-                case 'offer':
-                    await handleOffer(message.offer);
-                    break;
-                    
-                case 'answer':
-                    await handleAnswer(message.answer);
-                    break;
-                    
-                case 'ice-candidate':
-                    await handleIceCandidate(message.candidate);
-                    break;
-                    
-                case 'error':
-                    updateConnectionStatus(`エラー: ${message.message}`, 'status-disconnected');
-                    break;
-                    
-                case 'hostLeft':
-                case 'guestLeft':
-                    updateConnectionStatus(message.message, 'status-disconnected');
-                    resetToInitialState();
-                    break;
-            }
-        }
-        
-        // P2P接続作成
-        async function createPeerConnection() {
-            peerConnection = new RTCPeerConnection(rtcConfig);
-            
-            // データチャンネル作成（ホストの場合）
-            if (isHost) {
-                dataChannel = peerConnection.createDataChannel('game', {
-                    ordered: true
-                });
-                setupDataChannel();
-            }
-            
-            // データチャンネル受信（ゲストの場合）
-            peerConnection.ondatachannel = (event) => {
-                dataChannel = event.channel;
-                setupDataChannel();
-            };
-            
-            // ICE候補の処理
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    sendSignalingMessage({
-                        type: 'ice-candidate',
-                        candidate: event.candidate
-                    });
-                }
-            };
-            
-            // 接続状態の監視
-            peerConnection.onconnectionstatechange = () => {
-                console.log('接続状態:', peerConnection.connectionState);
-                if (peerConnection.connectionState === 'connected') {
-                    updateConnectionStatus('P2P接続完了！', 'status-connected');
-                } else if (peerConnection.connectionState === 'disconnected' || 
-                          peerConnection.connectionState === 'failed') {
-                    updateConnectionStatus('P2P接続が切断されました', 'status-disconnected');
-                }
-            };
-        }
-        
-        // オファー作成
-        async function createOffer() {
-            try {
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
-                sendSignalingMessage({
-                    type: 'offer',
-                    offer: offer
-                });
-            } catch (error) {
-                console.error('オファー作成エラー:', error);
-            }
-        }
-        
-        // オファー処理
-        async function handleOffer(offer) {
-            try {
-                await peerConnection.setRemoteDescription(offer);
-                const answer = await peerConnection.createAnswer();
-                await peerConnection.setLocalDescription(answer);
-                sendSignalingMessage({
-                    type: 'answer',
-                    answer: answer
-                });
-            } catch (error) {
-                console.error('オファー処理エラー:', error);
-            }
-        }
-        
-        // アンサー処理
-        async function handleAnswer(answer) {
-            try {
-                await peerConnection.setRemoteDescription(answer);
-            } catch (error) {
-                console.error('アンサー処理エラー:', error);
-            }
-        }
-        
-        // ICE候補処理
-        async function handleIceCandidate(candidate) {
-            try {
-                await peerConnection.addIceCandidate(candidate);
-            } catch (error) {
-                console.error('ICE候補処理エラー:', error);
-            }
-        }
-        
-        // シグナリングメッセージ送信
-        function sendSignalingMessage(message) {
-            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                signalingSocket.send(JSON.stringify(message));
-            }
-        }
-        
-        // データチャンネル設定
-        function setupDataChannel() {
-            dataChannel.onopen = () => {
-                console.log('データチャンネルが開かれました');
-                startGame();
-            };
-            
-            dataChannel.onmessage = (event) => {
-                const data = JSON.parse(event.data);
-                handleRemoteMessage(data);
-            };
-            
-            dataChannel.onerror = (error) => {
-                console.error('データチャンネルエラー:', error);
-            };
-            
-            dataChannel.onclose = () => {
-                console.log('データチャンネルが閉じられました');
-            };
-        }
-        
-        // イベントリスナー
-        document.getElementById('createRoomBtn').addEventListener('click', () => {
-            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                isHost = true;
-                sendSignalingMessage({ type: 'createRoom' });
-            } else {
-                updateConnectionStatus('シグナリングサーバーに接続してください', 'status-disconnected');
-            }
-        });
-        
-        document.getElementById('joinRoomBtn').addEventListener('click', () => {
-            if (signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                isHost = false;
-                joinSection.style.display = 'block';
-                roomCodeSection.style.display = 'none';
-            } else {
-                updateConnectionStatus('シグナリングサーバーに接続してください', 'status-disconnected');
-            }
-        });
-        
-        document.getElementById('connectBtn').addEventListener('click', () => {
-            const code = document.getElementById('joinCodeInput').value.trim().toUpperCase();
-            if (code && signalingSocket && signalingSocket.readyState === WebSocket.OPEN) {
-                sendSignalingMessage({
-                    type: 'joinRoom',
-                    roomCode: code
-                });
-            }
-        });
-        
-        // 初期状態にリセット
-        function resetToInitialState() {
-            connectionPanel.style.display = 'block';
-            gameContainer.style.display = 'none';
-            roomCodeSection.style.display = 'none';
-            joinSection.style.display = 'none';
-            gameStarted = false;
-            
-            if (dataChannel) {
-                dataChannel.close();
-                dataChannel = null;
-            }
-            
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-        }
-        
-        // リモートメッセージ処理
-        function handleRemoteMessage(data) {
-            switch (data.type) {
-                case 'playerMove':
-                    const targetPlayer = isHost ? player2 : player1;
-                    targetPlayer.x = data.x;
-                    targetPlayer.y = data.y;
-                    targetPlayer.vx = data.vx;
-                    targetPlayer.vy = data.vy;
-                    targetPlayer.pushing = data.pushing;
-                    break;
-                    
-                case 'gameState':
-                    if (data.winner) {
-                        winner = data.winner === 'player1' ? player1 : player2;
-                        gameState = 'winner';
-                        winnerTimer = data.winnerTimer;
-                        updateWinnerDisplay();
-                    }
-                    break;
-                    
-                case 'gameReset':
-                    resetGame();
-                    break;
-            }
-        }
-        
-        // データ送信
-        function sendData(data) {
-            if (dataChannel && dataChannel.readyState === 'open') {
-                dataChannel.send(JSON.stringify(data));
-            }
-        }
-        
-        // ゲーム開始
-        function startGame() {
-            connectionPanel.style.display = 'none';
-            gameContainer.style.display = 'block';
-            gameStarted = true;
-            gameState = 'playing';
-            
-            if (!isHost) {
-                player1.color = '#4444FF';
-                player2.color = '#FF4444';
-            }
-            
-            resetGame();
-            gameLoop();
-        }
-        
-        // ゲーム関数群（前回と同じ）
+        // Utility functions
         function distance(a, b) {
             return Math.sqrt((a.x - b.x) ** 2 + (a.y - b.y) ** 2);
         }
@@ -567,29 +369,115 @@
             return { x: vector.x / len, y: vector.y / len };
         }
         
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                const roomCode = document.getElementById('roomCode');
+                const originalText = roomCode.textContent;
+                roomCode.textContent = 'コピー済み！';
+                setTimeout(() => {
+                    roomCode.textContent = originalText;
+                }, 1000);
+            });
+        }
+        
+        function createParticle(x, y) {
+            const particle = document.createElement('div');
+            particle.className = 'particle';
+            particle.style.left = (x - 2) + 'px';
+            particle.style.top = (y - 2) + 'px';
+            gameContainer.appendChild(particle);
+            
+            setTimeout(() => {
+                if (particle.parentNode) {
+                    particle.parentNode.removeChild(particle);
+                }
+            }, 1000);
+        }
+        
+        function updateConnectionStatus(status, className) {
+            connectionStatus.textContent = status;
+            connectionStatus.className = className;
+        }
+        
+        // Demo mode functions
+        function startDemoGame() {
+            if (DEMO_MODE) {
+                gameState = 'playing';
+                gameStarted = true;
+                connectionPanel.style.display = 'none';
+                gameContainer.style.display = 'block';
+                gameContainer.classList.add('ring-glow');
+                powerMeter.style.display = 'block';
+                updateConnectionStatus('デモモード - CPUと対戦中', 'status-connected');
+                resetGame();
+            }
+        }
+        
+        function handleAI() {
+            if (!player2.isAI || gameState !== 'playing') return;
+            
+            player2.aiTimer++;
+            
+            // Simple AI behavior
+            const dx = player1.x - player2.x;
+            const dy = player1.y - player2.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            // Move towards player1
+            if (dist > PLAYER_SIZE * 2.5) {
+                player2.vx += (dx / dist) * PLAYER_SPEED * 0.5;
+                player2.vy += (dy / dist) * PLAYER_SPEED * 0.5;
+            }
+            
+            // Push when close
+            if (dist < PLAYER_SIZE * 3 && player2.pushCooldown <= 0 && Math.random() < 0.05) {
+                player2.pushing = true;
+                player2.pushCooldown = 30 + Math.random() * 20;
+            }
+            
+            // Random movement
+            if (Math.random() < 0.02) {
+                player2.vx += (Math.random() - 0.5) * PLAYER_SPEED;
+                player2.vy += (Math.random() - 0.5) * PLAYER_SPEED;
+            }
+        }
+        
         function handleInput() {
             if (gameState !== 'playing') return;
             
-            const myPlayer = isHost ? player1 : player2;
+            // Movement
+            if (keys['w']) player1.vy -= PLAYER_SPEED;
+            if (keys['s']) player1.vy += PLAYER_SPEED;
+            if (keys['a']) player1.vx -= PLAYER_SPEED;
+            if (keys['d']) player1.vx += PLAYER_SPEED;
             
-            if (keys['w']) myPlayer.vy -= PLAYER_SPEED;
-            if (keys['s']) myPlayer.vy += PLAYER_SPEED;
-            if (keys['a']) myPlayer.vx -= PLAYER_SPEED;
-            if (keys['d']) myPlayer.vx += PLAYER_SPEED;
-            
-            if (mouseButtons[0] && myPlayer.pushCooldown <= 0) {
-                myPlayer.pushing = true;
-                myPlayer.pushCooldown = 20;
+            // Charging push
+            if (mouseButtons[0] && !isCharging && player1.pushCooldown <= 0) {
+                isCharging = true;
+                pushPower = 0;
             }
             
-            sendData({
-                type: 'playerMove',
-                x: myPlayer.x,
-                y: myPlayer.y,
-                vx: myPlayer.vx,
-                vy: myPlayer.vy,
-                pushing: myPlayer.pushing
-            });
+            if (isCharging) {
+                pushPower = Math.min(pushPower + 2, MAX_POWER);
+                powerBar.style.width = (pushPower / MAX_POWER * 100) + '%';
+            }
+            
+            // Release push
+            if (!mouseButtons[0] && isCharging) {
+                isCharging = false;
+                player1.pushing = true;
+                player1.pushCooldown = 30 + pushPower * 0.5;
+                
+                // Create particles on strong push
+                if (pushPower > 50) {
+                    for (let i = 0; i < 5; i++) {
+                        createParticle(player1.x + Math.random() * 20 - 10, player1.y + Math.random() * 20 - 10);
+                    }
+                }
+                
+                pushPower = 0;
+                powerBar.style.width = '0%';
+            }
         }
         
         function handleCollision() {
@@ -607,9 +495,11 @@
                 player2.x += norm.x * overlap * 0.5;
                 player2.y += norm.y * overlap * 0.5;
                 
+                // Enhanced push with power
                 if (player1.pushing) {
-                    player2.vx += norm.x * PUSH_FORCE;
-                    player2.vy += norm.y * PUSH_FORCE;
+                    const force = PUSH_FORCE * (1 + pushPower / MAX_POWER);
+                    player2.vx += norm.x * force;
+                    player2.vy += norm.y * force;
                 }
                 
                 if (player2.pushing) {
@@ -645,26 +535,14 @@
                 winner = player2;
                 player2.wins++;
                 gameState = 'winner';
-                winnerTimer = 120;
+                winnerTimer = 180;
                 updateWinnerDisplay();
-                
-                sendData({
-                    type: 'gameState',
-                    winner: 'player2',
-                    winnerTimer: winnerTimer
-                });
             } else if (dist2 > RING_RADIUS - PLAYER_SIZE) {
                 winner = player1;
                 player1.wins++;
                 gameState = 'winner';
-                winnerTimer = 120;
+                winnerTimer = 180;
                 updateWinnerDisplay();
-                
-                sendData({
-                    type: 'gameState',
-                    winner: 'player1',
-                    winnerTimer: winnerTimer
-                });
             }
         }
         
@@ -691,16 +569,16 @@
             
             gameState = 'playing';
             winner = null;
+            pushPower = 0;
+            isCharging = false;
             document.getElementById('winner').textContent = '';
-            
-            sendData({
-                type: 'gameReset'
-            });
+            powerBar.style.width = '0%';
         }
         
         function render() {
             ctx.clearRect(0, 0, canvas.width, canvas.height);
             
+            // Draw ring
             ctx.fillStyle = '#DEB887';
             ctx.beginPath();
             ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS, 0, Math.PI * 2);
@@ -712,6 +590,7 @@
             ctx.arc(RING_CENTER.x, RING_CENTER.y, RING_RADIUS - 2, 0, Math.PI * 2);
             ctx.stroke();
             
+            // Center line
             ctx.strokeStyle = '#654321';
             ctx.lineWidth = 2;
             ctx.beginPath();
@@ -719,30 +598,44 @@
             ctx.lineTo(RING_CENTER.x, RING_CENTER.y + RING_RADIUS - 20);
             ctx.stroke();
             
+            // Draw players
             function drawPlayer(player) {
                 ctx.fillStyle = player.color;
                 ctx.strokeStyle = player.pushing ? '#FFD700' : '#000';
                 ctx.lineWidth = player.pushing ? 4 : 2;
                 
+                // Body
                 ctx.beginPath();
                 ctx.arc(player.x, player.y, PLAYER_SIZE, 0, Math.PI * 2);
                 ctx.fill();
                 ctx.stroke();
                 
+                // Eyes
                 ctx.fillStyle = '#000';
                 ctx.beginPath();
                 ctx.arc(player.x - 8, player.y - 8, 3, 0, Math.PI * 2);
                 ctx.arc(player.x + 8, player.y - 8, 3, 0, Math.PI * 2);
                 ctx.fill();
                 
+                // Mouth
                 ctx.beginPath();
                 ctx.arc(player.x, player.y + 5, 6, 0, Math.PI);
                 ctx.stroke();
+                
+                // Cooldown indicator
+                if (player.pushCooldown > 0) {
+                    ctx.strokeStyle = '#FF0000';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(player.x, player.y, PLAYER_SIZE + 5, 0, (player.pushCooldown / 30) * Math.PI * 2);
+                    ctx.stroke();
+                }
             }
             
             drawPlayer(player1);
             drawPlayer(player2);
             
+            // Winner overlay
             if (gameState === 'winner') {
                 ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -753,23 +646,22 @@
                 ctx.fillText(`${winner.name} の勝利！`, canvas.width / 2, canvas.height / 2);
                 
                 ctx.font = '18px Arial';
-                ctx.fillText('3秒後に次の試合が始まります', canvas.width / 2, canvas.height / 2 + 50);
+                ctx.fillText(`${Math.ceil(winnerTimer / 60)}秒後に次の試合が始まります`, canvas.width / 2, canvas.height / 2 + 50);
             }
         }
         
         function gameLoop() {
             if (gameStarted) {
                 handleInput();
+                handleAI();
                 
                 if (gameState === 'playing') {
-                    if (isHost) {
-                        handleCollision();
-                        updatePhysics();
-                        checkWinner();
-                    }
+                    handleCollision();
+                    updatePhysics();
+                    checkWinner();
                 } else if (gameState === 'winner') {
                     winnerTimer--;
-                    if (winnerTimer <= 0 && isHost) {
+                    if (winnerTimer <= 0) {
                         resetGame();
                     }
                 }
@@ -780,7 +672,7 @@
             requestAnimationFrame(gameLoop);
         }
         
-        // イベントリスナー
+        // Event listeners
         document.addEventListener('keydown', (e) => {
             keys[e.key.toLowerCase()] = true;
         });
@@ -803,8 +695,21 @@
             e.preventDefault();
         });
         
-        // 初期化
-        connectToSignalingServer();
+        // Button handlers
+        document.getElementById('createRoomBtn').addEventListener('click', () => {
+            startDemoGame();
+        });
+        
+        document.getElementById('joinRoomBtn').addEventListener('click', () => {
+            startDemoGame();
+        });
+        
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            startDemoGame();
+        });
+        
+        // Initialize
+        updateConnectionStatus('デモモード準備完了', 'status-connected');
         gameLoop();
     </script>
 </body>
